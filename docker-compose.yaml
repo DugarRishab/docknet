@@ -1,0 +1,80 @@
+version: "3.8"
+
+networks:
+  docknet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24
+
+volumes:
+  program-files: {}     # shared upload area
+
+services:
+  docknet-central:
+    build:
+      context: ./central
+      dockerfile: Dockerfile
+
+    image: central:latest     # your built central-node image
+    container_name: docknet-central
+    
+    networks:
+      docknet:
+        ipv4_address: 172.25.0.10
+    environment:
+      - PORT=8000
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"] 
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+      
+    volumes:
+      - ./central/data:/data       # persists SQLite file
+      - /var/run/docker.sock:/var/run/docker.sock # allows central to manage Docker Daemon of Host
+    ports:
+      - "8000:8000"                # allow dashboard & worker to talk to central
+
+  docknet-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    image: dashboard:latest  # your React app image
+    container_name: docknet-dashboard
+    networks:
+      docknet:
+        ipv4_address: 172.25.0.20
+    volumes:
+      - program-files:/mnt/uploads    # where uploads land
+    ports:
+      - "3000:80"                     # map container’s NGINX/React port 80 → host 3000
+
+  # docknet-worker:
+  #   image: docknet/worker:latest     # your tangle-sg + monitoring plugin image
+  #   networks:
+  #     docknet:
+  #       # note: each replica gets a dynamic IP in the 172.25.0.0/24 range
+  #   volumes:
+  #     - program-files:/app/program    # your uploaded binary in /app/program
+  #   environment:
+  #     - CENTRAL_WS=ws://172.25.0.10:4000/worker
+  #     - NODE_ID=${NODE_ID}            # passed in by Compose
+  #     - GENESIS_ID=${GENESIS_ID}      # if you’re injecting it via ENV
+  #   deploy:
+  #     replicas: 20                    # or any number the user picks
+  #     restart_policy:
+  #       condition: on-failure
+
+  docknet-worker-template:
+    # purely to build the worker image
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: docknet/worker:latest
+    networks:
+      - docknet
+    # no real container run—just build the image
+    entrypoint: ["/bin/true"]

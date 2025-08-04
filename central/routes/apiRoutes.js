@@ -3,6 +3,7 @@
 const express = require("express");
 const router = express.Router();
 const { getRecentTelemetry } = require("../utils/db");
+const { startWorkers } = require("../controllers/workerController");
 
 // GET /api/latest - Return the latest N telemetry entries
 router.get("/latest", async (req, res) => {
@@ -18,5 +19,7 @@ router.get("/latest", async (req, res) => {
 		});
 	}
 });
+
+router.get("/start", startWorkers);
 
 module.exports = router;

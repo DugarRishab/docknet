@@ -1,7 +1,17 @@
 // central/utils/db.js
-
+const path = require("path");
 const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("db.sqlite");
+
+const file =
+	process.env.SQLITE_FILE || path.join(__dirname, "../data/db.sqlite3");
+
+const db = new sqlite3.Database(file, (err) => {
+	if (err) {
+		console.error("Failed to open DB:", err);
+		process.exit(1);
+	}
+	console.log(`SQLite DB opened at ${file}`);
+});
 
 db.serialize(() => {
 	db.run(`
@@ -43,6 +53,7 @@ function getRecentTelemetry(limit = 20) {
 }
 
 module.exports = {
+	db,
 	insertTelemetry,
 	getRecentTelemetry,
 };

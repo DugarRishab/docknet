@@ -5,6 +5,9 @@ const app = require("./app"); // Express app
 const { setupWorkerSocket } = require("./sockets/workerSocket");
 const { setupDashboardSocket } = require("./sockets/dashboardSocket");
 const WebSocket = require("ws");
+const {db} = require("./utils/db");
+
+app.locals.db = db;
 
 const PORT = process.env.PORT || 4000;
 
@@ -12,20 +15,27 @@ const PORT = process.env.PORT || 4000;
 const server = http.createServer(app);
 
 // Setup WebSocket Server
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({
+	server,
+	path: "/ws",
+});
 
 // WebSocket client type routing
 wss.on("connection", (ws, req) => {
     const url = req.url;
     
-    if (url === "/worker") {
+    if (url.startsWith("/worker")) {
         setupWorkerSocket(ws);
-    } else if (url === "/dashboard") {
+    } else if (url.startsWith("/dashboard")) {
         setupDashboardSocket(ws);
     } else {
         console.log("Unknown WebSocket client tried to connect.");
         ws.close();
     }
+});
+
+wss.on("error", (err) => {
+	console.error("WebSocket Server error:", err);
 });
 
 // Start server
