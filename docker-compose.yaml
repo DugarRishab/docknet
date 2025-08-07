@@ -5,7 +5,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.25.0.0/24
+        - subnet: 172.25.0.0/24  # changing this subnet is fine, but must match the one in the worker template, central and dashboard & in dockerfile of worker
 
 volumes:
   program-files: {}     # shared upload area
@@ -73,8 +73,12 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile
+      args:
+        BASE_IP: ${BASE_IP:-172.25.0.1}
     image: docknet/worker:latest
     networks:
       - docknet
+    environment:
+      BASE_IP: ${BASE_IP:-172.25.0.1}
     # no real container run—just build the image
     entrypoint: ["/bin/true"]

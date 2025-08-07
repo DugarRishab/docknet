@@ -13,6 +13,9 @@ cd /app/tangle-sg
 # Assuming your repo has a Makefile that produces `tangle_poc`
 ./install.sh
 
+# print all IPv4 addresses on this host
+echo "[INFO] My IP(s): $(hostname -I)"
+
 # 3. Copy the built binary to /app
 cp ./tangle_poc /app/tangle_poc
 chmod +x /app/tangle_poc

@@ -1,4 +1,7 @@
 FROM ubuntu:20.04
+
+ARG BASE_IP=172.25.0.1     
+ENV BASE_IP=${BASE_IP} 
 # … install dependencies …
 # 3. Update and install prerequisites
 RUN --mount=type=cache,id=apt-cache,target=/var/cache/apt \
@@ -33,5 +36,7 @@ RUN --mount=type=cache,id=apt-cache,target=/var/cache/apt \
 WORKDIR /app
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
+
+ENV HMAC_SECRET="dbicbidbicdnsonxpwqhudighsanxwqoueiobjsamopdjwqioh"
 
 ENTRYPOINT ["./entrypoint.sh"]
