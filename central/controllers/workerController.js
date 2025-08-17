@@ -10,7 +10,7 @@ const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 const SHARED_VOLUME = 'program-files';
 
 exports.startWorkers = catchAsync(async (req, res, next) => {
-    const { node_count, tx_count, tx_delay, max_peers, pow, run } = req.query;
+    const { node_count, tx_count, tx_delay, max_peers, pow, run, wait } = req.query;
     if (!node_count || node_count < 1)
         return next(new AppError('Invalid node_count', 400));
 
@@ -52,7 +52,8 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
                         `TX_DELAY=${tx_delay}`,
                         `MAX_PEERS=${max_peers}`,
 						`POW=${pow || 3}`, // Default POW difficulty is 3
-						`RUN_ID=${run || 0}`
+						`RUN_ID=${run || 0}`,
+						`WAIT_PERIOD=${wait || 300}`, // Default wait period is 300 seconds
                     ],
                     HostConfig: {
                         NetworkMode: 'docknet_docknet',
