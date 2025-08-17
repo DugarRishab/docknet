@@ -154,6 +154,16 @@ const saveArrayToFile = async (data, filePath) => {
     return { path: filePath, rows: data.length, bytes: Buffer.byteLength(csv) };
 };
 
+const saveJsonToFile = async (obj, destPath) => {
+    const str = JSON.stringify(obj, null, 2);
+    await writeAtomic(destPath, Buffer.from(str, 'utf8'));
+    return {
+        path: destPath,
+        bytes: Buffer.byteLength(str),
+        items: Array.isArray(obj) ? obj.length : undefined,
+    };
+}
+
 function quoteCell(s) {
     if (s === undefined || s === null) s = '';
     s = String(s);
@@ -165,4 +175,5 @@ function quoteCell(s) {
 
 module.exports = {
 	saveArrayToFile,
+	saveJsonToFile
 }
