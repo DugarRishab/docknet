@@ -1,44 +1,30 @@
 // central/server.js
+const dotenv = require("dotenv");
 
-const http = require("http");
+dotenv.config({ path: "./config.env" });
+
 const app = require("./app"); // Express app
-const { setupWorkerSocket } = require("./sockets/workerSocket");
-const { setupDashboardSocket } = require("./sockets/dashboardSocket");
-const WebSocket = require("ws");
-const {db} = require("./utils/db");
 
-app.locals.db = db;
-
-const PORT = process.env.PORT || 4000;
-
-// Create HTTP server from Express app
-const server = http.createServer(app);
-
-// Setup WebSocket Server
-const wss = new WebSocket.Server({
-	server,
-	path: "/ws",
+// Catching uncaught exception ->>
+process.on('unCaughtException', (err) => {
+	console.log(`UNCAUGHT EXCEPTION -> ${err.name} - ${err.message}`);
+	console.log('App SHUTTING DOWN...');
+	process.exit(1); // <- Then will shut down the server.
 });
 
-// WebSocket client type routing
-wss.on("connection", (ws, req) => {
-    const url = req.url;
-    
-    if (url.startsWith("/worker")) {
-        setupWorkerSocket(ws);
-    } else if (url.startsWith("/dashboard")) {
-        setupDashboardSocket(ws);
-    } else {
-        console.log("Unknown WebSocket client tried to connect.");
-        ws.close();
-    }
+// Starting Server ->>
+const port = process.env.PORT || 8000;
+const server = app.listen(port, () => {
+	console.log(`App running at port`, (`${port}`), '...');
 });
 
-wss.on("error", (err) => {
-	console.error("WebSocket Server error:", err);
-});
-
-// Start server
-server.listen(PORT, () => {
-    console.log(`Central Node server listening on http://localhost:${PORT}`);
+// Catching unHandleled Rejections ->
+process.on('unhandledRejection', (err) => {
+	console.log(`UNHANDELLED REJECTION -> ${err.name} - ${err.message}`);
+	console.log(err);
+	console.log('App SHUTTING DOWN...');
+	server.close(() => {	// <- This will first terminate all requests
+		
+		process.exit(1); // <- Then will shut down the server.
+	});
 });
