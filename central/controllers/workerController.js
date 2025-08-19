@@ -77,6 +77,9 @@ exports.uploadTelemetry = catchAsync(async (req, res, next) => {
         return next(new AppError('Missing required telemetry data', 400));
     }
 
+    console.log('Headers:', req.headers);
+    console.log('Content-Length:', req.headers['content-length']);
+
     const run = `run${runId || 0}`;
 
     const runDir = path.join(DATA_ROOT, run, nodeId);

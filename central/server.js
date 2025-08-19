@@ -18,6 +18,7 @@ const server = app.listen(port, () => {
 	console.log(`App running at port`, (`${port}`), '...');
 });
 
+
 // Catching unHandleled Rejections ->
 process.on('unhandledRejection', (err) => {
 	console.log(`UNHANDELLED REJECTION -> ${err.name} - ${err.message}`);
