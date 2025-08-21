@@ -1,8 +1,11 @@
 // central/routes/apiRoutes.js
 
-const express = require("express");
+const express = require('express');
 const router = express.Router();
-const { startWorkers, uploadTelemetry } = require("../controllers/workerController");
+const {
+    startWorkers,
+    uploadTelemetry,
+} = require('../controllers/workerController');
 
 // GET /api/latest - Return the latest N telemetry entries
 // router.get("/latest", async (req, res) => {
@@ -19,7 +22,20 @@ const { startWorkers, uploadTelemetry } = require("../controllers/workerControll
 // 	}
 // });
 
-router.get("/start", startWorkers); 
-router.post("/telemetry", uploadTelemetry);
+router.get('/start', startWorkers);
+router.post(
+    '/telemetry',
+    (req, res, next) => {
+        let size = 0;
+        req.on('data', (chunk) => (size += chunk.length));
+        req.on('end', () => {
+            console.log(
+                `[DEBUG] Incoming request ${req.method} ${req.url}, size=${size} bytes`
+            );
+        });
+        next();
+    },
+    uploadTelemetry
+);
 
 module.exports = router;
