@@ -16,6 +16,10 @@ cd /app/tangle-sg
 # print all IPv4 addresses on this host
 echo "[INFO] My IP(s): $(hostname -I)"
 
+# set MY_IP env var (first IP from hostname -I)
+export MY_IP=$(hostname -I)
+echo "[INFO] Using MY_IP=$MY_IP"
+
 # 3. Copy the built binary to /app
 cp ./tangle_poc /app/tangle_poc
 chmod +x /app/tangle_poc
