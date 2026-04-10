@@ -1,13 +1,13 @@
 // central/utils/broadcast.js
 
-const dashboardClients = new Set();
+const dashboardClients = new Map();
 
 /**
  * Add a new dashboard client WebSocket connection.
  * @param {WebSocket} ws - WebSocket client instance
  */
 function addClient(ws) {
-	dashboardClients.add(ws);
+	dashboardClients.set(ws, { lastPong: Date.now() });
 
 	ws.on("close", () => {
 		dashboardClients.delete(ws);
@@ -20,7 +20,8 @@ function addClient(ws) {
 		try {
 			const msg = JSON.parse(data);
 			if (msg.type === "pong") {
-				dashboardClients.get(ws).lastPong = Date.now();
+				const meta = dashboardClients.get(ws);
+				if (meta) meta.lastPong = Date.now();
 			}
 		} catch (_) {}
 	});

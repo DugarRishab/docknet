@@ -52,8 +52,66 @@ function getRecentTelemetry(limit = 20) {
 	});
 }
 
+function getTelemetryByNode(nodeId, limit = 100) {
+    return new Promise((resolve, reject) => {
+        db.all(
+            `
+            SELECT * FROM telemetry
+            WHERE node_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        `,
+            [nodeId, limit],
+            (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            }
+        );
+    });
+}
+
+function getTelemetryStats(runId = 0) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `
+            SELECT 
+                COUNT(*) as total_transactions,
+                AVG(tx_time_ms) as avg_tx_time,
+                AVG(pow_time_ms) as avg_pow_time,
+                COUNT(DISTINCT node_id) as active_nodes
+            FROM telemetry
+        `,
+            (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            }
+        );
+    });
+}
+
+function getTransactionById(txId) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `
+            SELECT * FROM telemetry
+            WHERE tx_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        `,
+            [txId],
+            (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            }
+        );
+    });
+}
+
 module.exports = {
-	db,
-	insertTelemetry,
-	getRecentTelemetry,
+    db,
+    insertTelemetry,
+    getRecentTelemetry,
+    getTelemetryByNode,
+    getTelemetryStats,
+    getTransactionById,
 };

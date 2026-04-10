@@ -3,10 +3,13 @@ const dotenv = require("dotenv");
 
 dotenv.config({ path: "./config.env" });
 
+const { WebSocketServer } = require("ws");
+const url = require("url");
 const app = require("./app"); // Express app
+const { setupDashboardSocket } = require("./sockets/dashboardSocket");
 
 // Catching uncaught exception ->>
-process.on('unCaughtException', (err) => {
+process.on('uncaughtException', (err) => {
 	console.log(`UNCAUGHT EXCEPTION -> ${err.name} - ${err.message}`);
 	console.log('App SHUTTING DOWN...');
 	process.exit(1); // <- Then will shut down the server.
@@ -18,6 +21,19 @@ const server = app.listen(port, () => {
 	console.log(`App running at port`, (`${port}`), '...');
 });
 
+// WebSocket server — attached to the same HTTP server
+const wss = new WebSocketServer({ server });
+
+wss.on("connection", (ws, req) => {
+	const pathname = url.parse(req.url).pathname;
+
+	if (pathname === "/dashboard") {
+		setupDashboardSocket(ws);
+	} else {
+		console.log(`Unknown WS path: ${pathname}, closing.`);
+		ws.close(4000, "Unknown path");
+	}
+});
 
 // Catching unHandleled Rejections ->
 process.on('unhandledRejection', (err) => {

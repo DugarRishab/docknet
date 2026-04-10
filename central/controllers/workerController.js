@@ -45,7 +45,7 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
                     Image: 'docknet/worker:latest',
                     Env: [
                         `NODE_ID=worker${i}`,
-                        `CENTRAL_WS=ws://localhost:8000/worker`,
+                        `TELEMETRY_ENDPOINT=http://172.25.0.10:8000/api/telemetry`,
                         `REPO_URL=https://github.com/DugarRishab/tangle-sg`, // passed into entrypoint
                         `REPO_BRANCH=monitor`,
                         `TX_COUNT=${tx_count}`,

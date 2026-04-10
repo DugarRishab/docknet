@@ -15,42 +15,44 @@ services:
     build:
       context: ./central
       dockerfile: Dockerfile
-
-    image: central:latest     # your built central-node image
+    image: central:latest
     container_name: docknet-central
-    
     networks:
       docknet:
         ipv4_address: 172.25.0.10
     environment:
       - PORT=8000
-    
+      - NODE_ENV=production
+      - DATA_ROOT=/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"] 
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
       timeout: 10s
       retries: 3
-
-      
     volumes:
-      - ./central/data:/data       # persists SQLite file
-      - /var/run/docker.sock:/var/run/docker.sock # allows central to manage Docker Daemon of Host
+      - ./central/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
-      - "8000:8000"                # allow dashboard & worker to talk to central
+      - "8000:8000"
 
   docknet-dashboard:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
-    image: dashboard:latest  # your React app image
+      args:
+        VITE_API_URL: http://172.25.0.10:8000
+        VITE_WS_URL: ws://172.25.0.10:8000
+    image: dashboard:latest
     container_name: docknet-dashboard
     networks:
       docknet:
         ipv4_address: 172.25.0.20
     volumes:
-      - program-files:/mnt/uploads    # where uploads land
+      - program-files:/mnt/uploads
     ports:
-      - "3000:80"                     # map container’s NGINX/React port 80 → host 3000
+      - "3000:80"
+    depends_on:
+      - docknet-central
 
   # docknet-worker:
   #   image: docknet/worker:latest     # your tangle-sg + monitoring plugin image

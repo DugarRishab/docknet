@@ -15,6 +15,8 @@ const AppError = require('./utils/appError');
 const errorController = require('./controllers/errorController');
 
 const apiRoutes = require('./routes/apiRoutes');
+const tangleRoutes = require('./routes/tangleRoutes');
+const peerRoutes = require('./routes/peerRoutes');
 
 const app = express();
 
@@ -43,6 +45,8 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api", apiRoutes);
+app.use('/api/tangle', tangleRoutes);
+app.use('/api/peers', peerRoutes);
 
 app.all("*", (req, res, next) => {
 	// <- Middleware to handle Non-existing Routes

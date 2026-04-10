@@ -1,6 +1,5 @@
 // central/sockets/dashboardSocket.js
-const { addClient, broadcast } = require("../utils/broadcast");
-const dashboardClients = new Set();
+const { addClient } = require("../utils/broadcast");
 
 /**
  * Handles a new WebSocket connection from the dashboard
@@ -8,13 +7,7 @@ const dashboardClients = new Set();
  */
 function setupDashboardSocket(ws) {
 	console.log("📊 Dashboard connected");
-	dashboardClients.add(ws);
 	addClient(ws);
-	
-	ws.on("close", () => {
-		console.log("📉 Dashboard disconnected");
-		dashboardClients.delete(ws);
-	});
 
 	ws.on("error", (err) => {
 		console.error("Dashboard WS Error:", err.message);
@@ -23,5 +16,4 @@ function setupDashboardSocket(ws) {
 
 module.exports = {
 	setupDashboardSocket,
-	dashboardClients,
 };
