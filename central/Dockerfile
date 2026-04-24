@@ -15,6 +15,16 @@ FROM node:22-bullseye-slim
 # Set working directory
 WORKDIR /app
 
+# Install Python 3 and pip, then install Python dependencies
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/requirements.txt ./scripts/requirements.txt
+RUN pip3 install --no-cache-dir -r ./scripts/requirements.txt
+
+ENV PYTHON_BIN=python3
+
 # Install dependencies (with sqlite3 compiled from source)
 COPY package*.json ./
 RUN npm ci 

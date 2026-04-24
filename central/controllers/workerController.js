@@ -1,10 +1,8 @@
 // central/controllers/workerController.js
 const catchAsync = require('./../utils/catchAsync');
 const AppError = require('./../utils/appError');
-const { saveArrayToFile, saveJsonToFile } = require('../utils/saveFIle');
+const { saveTelemetryBatch, getOrCreateRun, insertRunParams } = require('../utils/db');
 const Docker = require('dockerode');
-const path = require('path');
-const fs = require('fs');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 const SHARED_VOLUME = 'program-files';
@@ -65,51 +63,57 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
     }
 
     await Promise.all(promises);
-    res.status(200).json({ message: `${node_count} workers started` });
+
+    // Save run parameters to database
+    try {
+        const runRecord = await getOrCreateRun(parseInt(run) || 0);
+        await insertRunParams(parseInt(run) || 0, {
+            node_count: parseInt(node_count),
+            tx_count: parseInt(tx_count),
+            tx_delay: parseInt(tx_delay),
+            max_peers: parseInt(max_peers),
+            pow: parseInt(pow) || 3,
+            wait: parseInt(wait) || 300
+        });
+        console.log(`[startWorkers] Saved run params for run ${runRecord.run_id}`);
+    } catch (err) {
+        console.error('[startWorkers] Failed to save run params:', err);
+    }
+
+    res.status(200).json({
+        message: `${node_count} workers started`,
+        runId: parseInt(run) || 0
+    });
 });
 
 exports.uploadTelemetry = catchAsync(async (req, res, next) => {
-    const DATA_ROOT = process.env.DATA_ROOT || path.resolve('./data'); // data/runX/nodeY/...
-    fs.mkdirSync(DATA_ROOT, { recursive: true });
-
-    const { nodeId, tangle, peers, metrics, runId } = req.body;
+    const { nodeId, nodeIP, tangle, peers, metrics, runId } = req.body;
     if (!nodeId || !tangle || !peers || !metrics) {
         return next(new AppError('Missing required telemetry data', 400));
     }
 
-    console.log('Headers:', req.headers);
-    console.log('Content-Length:', req.headers['content-length']);
+    console.log(`[telemetry] Received from node: ${nodeId}, run: ${runId || 0}`);
+    console.log('[telemetry] Content-Length:', req.headers['content-length']);
 
-    const run = `run${runId || 0}`;
+    try {
+        // Save to SQLite database
+        const result = await saveTelemetryBatch(
+            runId || 0,
+            nodeId,
+            nodeIP || null,
+            { tangle, peers, metrics }
+        );
 
-    const runDir = path.join(DATA_ROOT, run, nodeId);
-    await fs.promises.mkdir(runDir, { recursive: true });
+        console.log(`[telemetry] Saved to SQL: run_id=${result.run.run_id}, node_index=${result.node.node_index}`);
 
-    // Save arrays to CSV files
-    const saved = {};
-    // tangle -> tangle.csv
-    saved.tangle = await saveJsonToFile(
-        tangle,
-        path.join(runDir, 'tangle.json')
-    );
-    // peers -> peers.csv
-    saved.peers = await saveJsonToFile(peers, path.join(runDir, 'peers.json'));
-    // metrics -> metrics.csv
-    saved.metrics = await saveJsonToFile(
-        metrics,
-        path.join(runDir, 'metrics.json')
-    );
-
-    if (req.body.metadata) {
-        const meta = Object.assign({}, req.body.metadata || {}, {
-            node_id: nodeId,
-            run_id: run,
-            ts_received: new Date().toISOString(),
-            saved,
-		});
-		
-        await saveJsonToFile(meta, path.join(runDir, 'metadata.json'));
+        return res.status(200).json({
+            message: 'success',
+            runId: result.run.run_id,
+            nodeIndex: result.node.node_index,
+            originalNodeId: result.node.original_node_id
+        });
+    } catch (error) {
+        console.error('[telemetry] Error saving to SQL:', error);
+        return next(new AppError(`Failed to save telemetry: ${error.message}`, 500));
     }
-
-    return res.status(200).json({ message: 'success', run, nodeId, saved });
 });

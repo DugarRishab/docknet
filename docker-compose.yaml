@@ -40,8 +40,8 @@ services:
       context: ./dashboard
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: http://172.25.0.10:8000
-        VITE_WS_URL: ws://172.25.0.10:8000
+        VITE_API_URL: http://localhost:8000
+        VITE_WS_URL: ws://localhost:8000
     image: dashboard:latest
     container_name: docknet-dashboard
     networks:
@@ -51,6 +51,23 @@ services:
       - program-files:/mnt/uploads
     ports:
       - "3000:80"
+    depends_on:
+      - docknet-central
+
+  docknet-web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000
+        VITE_WS_URL: ws://localhost:8000
+    image: docknet-web:latest
+    container_name: docknet-web
+    networks:
+      docknet:
+        ipv4_address: 172.25.0.21
+    ports:
+      - "3001:80"
     depends_on:
       - docknet-central
 

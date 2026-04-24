@@ -127,6 +127,25 @@ export interface NodeStatus {
   health: 'healthy' | 'partial' | 'unhealthy' | 'unknown';
 }
 
+// Run and Node interfaces
+export interface Run {
+  id: number;
+  run_id: number;
+  started_at: string;
+  ended_at: string | null;
+  node_count: number;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface Node {
+  id: number;
+  run_id: number;
+  node_index: number;
+  original_node_id: string;
+  node_ip: string | null;
+  created_at: string;
+}
+
 // API hooks
 export function useTangleData(runId: number = 0, limit: number = 500, offset: number = 0) {
   return useQuery({
@@ -221,5 +240,32 @@ export function useInvalidateQueries() {
     invalidateTangle: () => queryClient.invalidateQueries({ queryKey: ['tangle'] }),
     invalidatePeers: () => queryClient.invalidateQueries({ queryKey: ['peer-topology'] }),
     invalidateNodes: () => queryClient.invalidateQueries({ queryKey: ['node-status'] }),
+    invalidateRuns: () => queryClient.invalidateQueries({ queryKey: ['runs'] }),
   };
+}
+
+// New hooks for runs and nodes
+export function useAvailableRuns() {
+  return useQuery({
+    queryKey: ['runs'],
+    queryFn: async () => {
+      const response = await axios.get(`${API_BASE}/tangle/runs`);
+      return response.data.data.runs as Run[];
+    },
+    staleTime: 30000,
+    refetchInterval: 30000,
+  });
+}
+
+export function useNodes(runId: number = 0) {
+  return useQuery({
+    queryKey: ['nodes', runId],
+    queryFn: async () => {
+      const response = await axios.get(`${API_BASE}/tangle/runs/${runId}/nodes`);
+      return response.data.data.nodes as Node[];
+    },
+    staleTime: 5000,
+    refetchInterval: 10000,
+    enabled: runId >= 0,
+  });
 }

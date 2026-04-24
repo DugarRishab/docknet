@@ -1,6 +1,7 @@
 import React from "react";
-import { Network, Activity, Wifi, Settings, Play } from "lucide-react";
+import { Network, Activity, Wifi, Settings, Play, Loader2 } from "lucide-react";
 import { useTelemetryStore } from "../store/useTelemetryStore";
+import { useAvailableRuns, useNodes } from "../hooks/useTangleData";
 
 interface LayoutProps {
 	children: React.ReactNode;
@@ -18,6 +19,12 @@ const navItems = [
 export function Layout({ children, activeView, onViewChange }: LayoutProps) {
 	const { isConnected, wsError, selectedRunId, setSelectedRunId } =
 		useTelemetryStore();
+
+	// Fetch available runs from API
+	const { data: runs, isLoading: runsLoading, error: runsError } = useAvailableRuns();
+
+	// Fetch nodes for selected run
+	const { data: nodes, isLoading: nodesLoading } = useNodes(selectedRunId);
 
 	return (
 		<div className="flex flex-col h-screen bg-background">
@@ -55,21 +62,48 @@ export function Layout({ children, activeView, onViewChange }: LayoutProps) {
 						<span className="text-sm text-muted-foreground">
 							Run:
 						</span>
-						<select
-							value={selectedRunId}
-							onChange={(e) =>
-								setSelectedRunId(parseInt(e.target.value))
-							}
-							aria-label="Select run ID"
-							className="bg-background border border-input rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-						>
-							{[0, 1, 2, 3, 4, 5].map((id) => (
-								<option key={id} value={id}>
-									Run {id}
-								</option>
-							))}
-						</select>
+						{runsLoading ? (
+							<Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+						) : runsError || !runs || runs.length === 0 ? (
+							<select
+								value={selectedRunId}
+								onChange={(e) => setSelectedRunId(parseInt(e.target.value))}
+								aria-label="Select run ID"
+								className="bg-background border border-input rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+							>
+								<option value={0}>Run 0</option>
+							</select>
+						) : (
+							<select
+								value={selectedRunId}
+								onChange={(e) => setSelectedRunId(parseInt(e.target.value))}
+								aria-label="Select run ID"
+								className="bg-background border border-input rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+							>
+								{runs.map((run) => (
+									<option key={run.run_id} value={run.run_id}>
+										Run {run.run_id} ({run.node_count || 0} nodes)
+									</option>
+								))}
+							</select>
+						)}
 					</div>
+
+					{/* Node count display */}
+					{nodes && nodes.length > 0 && (
+						<div className="flex items-center gap-2">
+							<span className="text-sm text-muted-foreground">
+								Nodes:
+							</span>
+							<span className="text-sm font-medium">
+								{nodesLoading ? (
+									<Loader2 className="w-3 h-3 animate-spin inline" />
+								) : (
+									nodes.length
+								)}
+							</span>
+						</div>
+					)}
 
 					{/* Connection status */}
 					<div className="flex items-center gap-2">

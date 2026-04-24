@@ -12,14 +12,23 @@ interface GraphNode {
   receiver: string;
   amount: number;
   cumulativeWeight: number;
-  originNode: string;
+  originNodes: string[];
   timestamp: number;
+  isGenesis: boolean;
+  isConfirmed: boolean;
 }
 
 interface GraphLink {
   source: string;
   target: string;
   color: string;
+}
+
+interface TransactionGroup {
+  transactions: Transaction[];
+  maxWeight: number;
+  origins: string[];
+  isConfirmed: boolean;
 }
 
 export function TangleView() {
@@ -29,54 +38,105 @@ export function TangleView() {
   const [filterOrigin, setFilterOrigin] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
-  // Transform transactions into graph data
+  // Transform transactions into graph data with proper deduplication and link validation
   const { nodes, links, origins } = useMemo(() => {
     if (!tangleData?.transactions) return { nodes: [], links: [], origins: [] };
 
-    const nodeMap = new Map<string, GraphNode>();
-    const linkList: GraphLink[] = [];
+    // Step 1: Group transactions by ID (each transaction appears on multiple nodes)
+    const txGroups = new Map<string, TransactionGroup>();
     const originSet = new Set<string>();
-
-    // Color palette for different origins
-    const colors = [
-      '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
-      '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'
-    ];
-    const originColors = new Map<string, string>();
-    let colorIndex = 0;
 
     tangleData.transactions.forEach((tx) => {
       const origin = tx._originNode || 'unknown';
       originSet.add(origin);
-      
-      if (!originColors.has(origin)) {
-        originColors.set(origin, colors[colorIndex % colors.length]);
-        colorIndex++;
-      }
 
       const txId = tx.data?.transaction_id || tx.id;
-      if (!nodeMap.has(txId)) {
-        nodeMap.set(txId, {
-          id: txId,
-          val: Math.sqrt(tx.metadata?.cumulative_weight || 1) * 2 + 3,
-          color: originColors.get(origin) || '#6b7280',
-          sender: tx.data?.sender || 'unknown',
-          receiver: tx.data?.receiver || 'unknown',
-          amount: tx.data?.amount || 0,
-          cumulativeWeight: tx.metadata?.cumulative_weight || 1,
-          originNode: origin,
-          timestamp: tx.data?.timestamp || 0,
+      if (!txGroups.has(txId)) {
+        txGroups.set(txId, {
+          transactions: [],
+          maxWeight: 0,
+          origins: [],
+          isConfirmed: false,
         });
       }
 
-      // Create links from parents
-      if (tx.data?.parents) {
-        tx.data.parents.forEach((parentId) => {
-          linkList.push({
-            source: parentId,
-            target: txId,
-            color: '#4b5563',
-          });
+      const group = txGroups.get(txId)!;
+      group.transactions.push(tx);
+      group.maxWeight = Math.max(group.maxWeight, tx.metadata?.cumulative_weight || 1);
+      if (!group.origins.includes(origin)) {
+        group.origins.push(origin);
+      }
+      if (tx.metadata?.consensusTimestamp && tx.metadata.consensusTimestamp > 0) {
+        group.isConfirmed = true;
+      }
+    });
+
+    // Color palette for different origins
+    const colors = [
+      '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
+      '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'
+    ];
+
+    // Step 2: Create unique nodes from groups
+    const nodeMap = new Map<string, GraphNode>();
+
+    txGroups.forEach((group, txId) => {
+      const baseTx = group.transactions[0];
+      const isGenesis = txId === 'genesis' || baseTx.data?.parents?.length === 0;
+
+      // Determine color based on status and origin
+      let color: string;
+      if (group.isConfirmed) {
+        color = '#22c55e'; // Green for confirmed
+      } else if (isGenesis) {
+        color = '#3b82f6'; // Blue for genesis
+      } else {
+        // Use origin-based color for pending
+        const originIndex = origins.indexOf(group.origins[0]) % colors.length;
+        color = colors[originIndex] || '#f59e0b';
+      }
+
+      nodeMap.set(txId, {
+        id: txId,
+        val: Math.sqrt(group.maxWeight) * 2 + 3,
+        color,
+        sender: baseTx.data?.sender || 'unknown',
+        receiver: baseTx.data?.receiver || 'unknown',
+        amount: baseTx.data?.amount || 0,
+        cumulativeWeight: group.maxWeight,
+        originNodes: group.origins,
+        timestamp: baseTx.data?.timestamp || 0,
+        isGenesis,
+        isConfirmed: group.isConfirmed,
+      });
+    });
+
+    // Step 3: Build validated links (only link to existing nodes)
+    const linkList: GraphLink[] = [];
+    const linkSet = new Set<string>();
+
+    txGroups.forEach((group, txId) => {
+      const baseTx = group.transactions[0];
+
+      if (baseTx.data?.parents && baseTx.data.parents.length > 0) {
+        baseTx.data.parents.forEach((parentId) => {
+          // Skip genesis parent references and self-references
+          if (parentId === 'genesis' || parentId === txId) {
+            return;
+          }
+
+          // Only create link if parent exists in our node set
+          if (nodeMap.has(parentId)) {
+            const linkKey = `${parentId}->${txId}`;
+            if (!linkSet.has(linkKey)) {
+              linkList.push({
+                source: parentId,
+                target: txId,
+                color: '#4b5563',
+              });
+              linkSet.add(linkKey);
+            }
+          }
         });
       }
     });
@@ -91,13 +151,14 @@ export function TangleView() {
   // Filter nodes based on search and origin filter
   const filteredNodes = useMemo(() => {
     return nodes.filter((node) => {
-      const matchesSearch = searchQuery === '' || 
+      const matchesSearch = searchQuery === '' ||
         node.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
         node.sender.toLowerCase().includes(searchQuery.toLowerCase()) ||
         node.receiver.toLowerCase().includes(searchQuery.toLowerCase());
-      
-      const matchesOrigin = filterOrigin === null || node.originNode === filterOrigin;
-      
+
+      const matchesOrigin = filterOrigin === null ||
+        node.originNodes.includes(filterOrigin);
+
       return matchesSearch && matchesOrigin;
     });
   }, [nodes, searchQuery, filterOrigin]);
@@ -105,7 +166,9 @@ export function TangleView() {
   // Get connected links for filtered nodes
   const filteredLinks = useMemo(() => {
     const nodeIds = new Set(filteredNodes.map(n => n.id));
-    return links.filter(link => nodeIds.has(link.source as string) && nodeIds.has(link.target as string));
+    return links.filter(link =>
+      nodeIds.has(link.source as string) && nodeIds.has(link.target as string)
+    );
   }, [links, filteredNodes]);
 
   const graphData = useMemo(() => ({
@@ -115,39 +178,44 @@ export function TangleView() {
 
   const handleNodeClick = useCallback((node: GraphNode) => {
     setSelectedNode(node.id);
-    const tx = tangleData?.transactions.find(t => 
-      t.data?.transaction_id === node.id || t.id === node.id
+    // Find the transaction with matching origin (or first if no match)
+    const tx = tangleData?.transactions.find(t =>
+      (t.data?.transaction_id === node.id || t.id === node.id)
     );
     if (tx) {
       setSelectedTransaction(tx);
     }
   }, [tangleData, setSelectedTransaction]);
 
-  const nodePaint = (node: GraphNode, ctx: CanvasRenderingContext2D) => {
+  const nodePaint = (node: GraphNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const isSelected = node.id === selectedNode;
     const radius = node.val;
-    
-    // Draw node
+    const x = node.x || 0;
+    const y = node.y || 0;
+
+    // Draw node circle
     ctx.beginPath();
-    ctx.arc(node.x || 0, node.y || 0, radius, 0, 2 * Math.PI, false);
+    ctx.arc(x, y, radius, 0, 2 * Math.PI, false);
     ctx.fillStyle = node.color;
     ctx.fill();
-    
-    // Selection ring
-    if (isSelected) {
+
+    // Draw border for selected or genesis nodes
+    if (isSelected || node.isGenesis) {
       ctx.beginPath();
-      ctx.arc(node.x || 0, node.y || 0, radius + 3, 0, 2 * Math.PI, false);
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
+      ctx.arc(x, y, radius + (isSelected ? 3 : 2), 0, 2 * Math.PI, false);
+      ctx.strokeStyle = isSelected ? '#fff' : '#60a5fa';
+      ctx.lineWidth = isSelected ? 2 : 1.5;
       ctx.stroke();
     }
-    
-    // Label for larger nodes
-    if (radius > 6 || isSelected) {
-      ctx.font = '10px Inter, sans-serif';
+
+    // Draw label for larger nodes or when zoomed in
+    if (globalScale > 1.2 || radius > 6 || isSelected) {
+      ctx.font = `${Math.max(10, Math.round(radius))}px Inter, sans-serif`;
       ctx.fillStyle = '#e5e7eb';
       ctx.textAlign = 'center';
-      ctx.fillText(node.id.slice(0, 8) + '...', node.x || 0, (node.y || 0) + radius + 12);
+      ctx.textBaseline = 'middle';
+      const label = node.id.slice(0, 8) + (node.id.length > 8 ? '...' : '');
+      ctx.fillText(label, x, y + radius + 14);
     }
   };
 
@@ -227,7 +295,8 @@ export function TangleView() {
                 <p>Receiver: ${node.receiver}</p>
                 <p>Amount: ${node.amount}</p>
                 <p>Weight: ${node.cumulativeWeight}</p>
-                <p>Origin: ${node.originNode}</p>
+                <p>Status: ${node.isConfirmed ? 'Confirmed' : 'Pending'}</p>
+                <p>Nodes: ${node.originNodes.join(', ')}</p>
               </div>
             `}
             warmupTicks={100}

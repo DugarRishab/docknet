@@ -2,18 +2,18 @@ const express = require('express');
 const {
     getPeerTopology,
     getNodeStatus,
-    getPeerHistory
+    getNodeDetails
 } = require('../controllers/peerController');
 
 const router = express.Router();
 
-// Get peer network topology
-router.get('/topology', getPeerTopology);
+// Get peer network topology for a run
+router.get('/runs/:runId/topology', getPeerTopology);
 
-// Get live node status
-router.get('/nodes/status', getNodeStatus);
+// Get live node status for a run
+router.get('/runs/:runId/nodes/status', getNodeStatus);
 
-// Get peer history for a specific node
-router.get('/history', getPeerHistory);
+// Get node details (peers + metrics) for a specific node
+router.get('/runs/:runId/nodes/:nodeIndex', getNodeDetails);
 
 module.exports = router;
