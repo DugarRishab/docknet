@@ -15,6 +15,7 @@ const errorHandler = require('./controllers/errorController');
 
 // Route imports
 const simulationRoutes = require('./routes/simulationRoutes');
+const queueRoutes = require('./routes/queueRoutes');
 const ingestRoutes = require('./routes/ingestRoutes');
 const tangleRoutes = require('./routes/tangleRoutes');
 const peerRoutes = require('./routes/peerRoutes');
@@ -48,6 +49,9 @@ app.get("/", (req, res) => {
 		version: '2.0.0'
 	});
 });
+
+// Queue routes (more specific, mount first)
+app.use('/api/simulations/queue', queueRoutes);
 
 // Simulation control routes
 app.use('/api/simulations', simulationRoutes);

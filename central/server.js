@@ -19,6 +19,14 @@ process.on('uncaughtException', (err) => {
 const port = process.env.PORT || 8000;
 const server = app.listen(port, () => {
 	console.log(`App running at port`, (`${port}`), '...');
+
+	// Recover queue state after server startup
+	try {
+		const { recover } = require('./utils/queueRunner');
+		recover().catch(err => console.error('[server] Queue recovery failed:', err));
+	} catch (err) {
+		console.error('[server] Failed to load queueRunner for recovery:', err);
+	}
 });
 
 // WebSocket server — attached to the same HTTP server

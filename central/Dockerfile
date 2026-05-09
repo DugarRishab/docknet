@@ -17,7 +17,7 @@ WORKDIR /app
 
 # Install Python 3 and pip, then install Python dependencies
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip \
+ && apt-get install -y --no-install-recommends python3 python3-pip curl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/requirements.txt ./scripts/requirements.txt

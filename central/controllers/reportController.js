@@ -490,3 +490,269 @@ exports.getGeneratedMarkdown = catchAsync(async (req, res, next) => {
         return next(new AppError(`Failed to read report: ${err.message}`, 500));
     }
 });
+
+/**
+ * GET /api/report/:runId/generated/bundle
+ * Returns self-contained markdown with base64-embedded chart images
+ */
+exports.getGeneratedMarkdownBundle = catchAsync(async (req, res, next) => {
+    const runId = parseInt(req.params.runId);
+    if (isNaN(runId)) {
+        return next(new AppError('Invalid runId', 400));
+    }
+
+    const reportPath = path.join(dataDir, 'reports', `run_${runId}`, 'report.md');
+    const chartsDir = path.join(dataDir, 'reports', `run_${runId}`, 'charts');
+
+    // Read the markdown file
+    let content;
+    try {
+        content = fs.readFileSync(reportPath, 'utf-8');
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            return next(new AppError(`Report not generated yet for run ${runId}`, 404));
+        }
+        return next(new AppError(`Failed to read report: ${err.message}`, 500));
+    }
+
+    // Regex to find chart references: ![alt](charts/filename.png)
+    const chartPattern = /!\[([^\]]*)\]\(charts\/([A-Za-z0-9_.\-]+\.(png|jpg|jpeg|svg))\)/gi;
+
+    // Replace each chart reference with base64-embedded version
+    const transformedContent = content.replace(chartPattern, (match, altText, filename) => {
+        try {
+            // Resolve and validate path (prevent directory traversal)
+            const chartPath = path.resolve(chartsDir, filename);
+            const resolvedChartsDir = path.resolve(chartsDir);
+
+            if (!chartPath.startsWith(resolvedChartsDir + path.sep)) {
+                console.warn(`[reportController] Path traversal attempt blocked: ${filename}`);
+                return match; // Leave original reference
+            }
+
+            // Check if file exists
+            if (!fs.existsSync(chartPath)) {
+                console.warn(`[reportController] Chart not found: ${filename}`);
+                return match; // Leave original reference
+            }
+
+            // Read and base64 encode
+            const imageBuffer = fs.readFileSync(chartPath);
+            const base64Data = imageBuffer.toString('base64');
+
+            // Determine mime type
+            const ext = path.extname(filename).toLowerCase();
+            let mimeType = 'image/png';
+            if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+            else if (ext === '.svg') mimeType = 'image/svg+xml';
+
+            return `![${altText}](data:${mimeType};base64,${base64Data})`;
+        } catch (err) {
+            console.warn(`[reportController] Failed to embed chart ${filename}:`, err.message);
+            return match; // Leave original reference on error
+        }
+    });
+
+    // Set download headers
+    res.set({
+        'Content-Type': 'text/markdown',
+        'Content-Disposition': `attachment; filename="run_${runId}_report.md"`
+    });
+
+    res.send(transformedContent);
+});
+
+// ========== MULTI-RUN REPORTS ==========
+
+const { runMultiRunPythonReport } = require('../utils/runPythonReport');
+const { queryRunsByFilters } = require('../utils/db');
+
+/**
+ * GET /api/reports/runs/filter
+ * Query runs by filter criteria
+ */
+exports.queryRunsByFilters = catchAsync(async (req, res) => {
+    const filters = {
+        nodeRange: req.query.nodeRange ? req.query.nodeRange.split(',').map(Number) : null,
+        txRange: req.query.txRange ? req.query.txRange.split(',').map(Number) : null,
+        txDelay: req.query.txDelay != null ? parseInt(req.query.txDelay) : null,
+        maxPeers: req.query.maxPeers != null ? parseInt(req.query.maxPeers) : null,
+        pow: req.query.pow != null ? parseInt(req.query.pow) : null,
+        wait: req.query.wait != null ? parseInt(req.query.wait) : null,
+        status: req.query.status || null,
+        dateFrom: req.query.dateFrom || null,
+        dateTo: req.query.dateTo || null,
+    };
+
+    // Remove null values
+    Object.keys(filters).forEach(key => {
+        if (filters[key] == null) delete filters[key];
+    });
+
+    const runs = await queryRunsByFilters(filters);
+
+    res.status(200).json({
+        status: 'success',
+        count: runs.length,
+        filters,
+        data: { runs }
+    });
+});
+
+/**
+ * POST /api/reports/multi/generate
+ * Generate multi-run analysis report
+ */
+exports.generateMultiRunReport = catchAsync(async (req, res, next) => {
+    const { runIds, filters } = req.body;
+
+    if ((!runIds || runIds.length === 0) && (!filters || Object.keys(filters).length === 0)) {
+        return next(new AppError('Must provide either runIds or filters', 400));
+    }
+
+    // Generate unique report ID based on timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const reportId = `multi_${timestamp}`;
+    const outDir = path.join(dataDir, 'reports', reportId);
+
+    // Start report generation in background
+    runMultiRunPythonReport({ runIds, filters, outDir, timeoutMs: 900000 })
+        .then(() => {
+            console.log(`[reportController] Multi-run report generated: ${reportId}`);
+        })
+        .catch(err => {
+            console.error(`[reportController] Multi-run report failed: ${err.message}`);
+        });
+
+    res.status(202).json({
+        status: 'accepted',
+        reportId,
+        message: 'Report generation started',
+        estimatedTime: '30-60 seconds',
+        reportUrl: `/api/reports/multi/${reportId}`,
+        checkStatus: `/api/reports/multi/${reportId}/status`
+    });
+});
+
+/**
+ * GET /api/reports/multi/:reportId/status
+ * Check if a multi-run report is ready
+ */
+exports.getMultiRunReportStatus = catchAsync(async (req, res, next) => {
+    const { reportId } = req.params;
+    const reportPath = path.join(dataDir, 'reports', reportId, 'report.md');
+
+    try {
+        await fs.promises.access(reportPath);
+        res.status(200).json({
+            status: 'success',
+            ready: true,
+            reportId
+        });
+    } catch {
+        res.status(200).json({
+            status: 'success',
+            ready: false,
+            reportId
+        });
+    }
+});
+
+/**
+ * GET /api/reports/multi/:reportId
+ * Get multi-run report content
+ */
+exports.getMultiRunReport = catchAsync(async (req, res, next) => {
+    const { reportId } = req.params;
+    const reportPath = path.join(dataDir, 'reports', reportId, 'report.md');
+
+    try {
+        const content = await fs.promises.readFile(reportPath, 'utf-8');
+        res.type('text/markdown').send(content);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            return next(new AppError(`Report not found or not yet generated: ${reportId}`, 404));
+        }
+        return next(new AppError(`Failed to read report: ${err.message}`, 500));
+    }
+});
+
+/**
+ * GET /api/reports/multi
+ * List all multi-run reports
+ */
+exports.listMultiRunReports = catchAsync(async (req, res) => {
+    const reportsDir = path.join(dataDir, 'reports');
+    const reports = [];
+
+    try {
+        const entries = await fs.promises.readdir(reportsDir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+            if (entry.isDirectory() && entry.name.startsWith('multi_')) {
+                const reportPath = path.join(reportsDir, entry.name, 'report.md');
+                const dataPath = path.join(reportsDir, entry.name, 'data.json');
+                
+                try {
+                    const stats = await fs.promises.stat(reportPath);
+                    let metadata = {};
+                    
+                    try {
+                        const dataContent = await fs.promises.readFile(dataPath, 'utf-8');
+                        metadata = JSON.parse(dataContent);
+                    } catch {
+                        // Ignore missing/parsing errors
+                    }
+                    
+                    reports.push({
+                        reportId: entry.name,
+                        generatedAt: metadata.generated_at || stats.mtime.toISOString(),
+                        runCount: metadata.run_count || 0,
+                        runIds: metadata.run_ids || [],
+                        chartsCount: metadata.charts_count || 0,
+                        ready: true
+                    });
+                } catch {
+                    // Report not ready yet
+                    reports.push({
+                        reportId: entry.name,
+                        generatedAt: null,
+                        ready: false
+                    });
+                }
+            }
+        }
+
+        // Sort by generation date (newest first)
+        reports.sort((a, b) => {
+            if (!a.generatedAt) return 1;
+            if (!b.generatedAt) return -1;
+            return new Date(b.generatedAt) - new Date(a.generatedAt);
+        });
+
+    } catch (err) {
+        // Reports directory may not exist yet
+    }
+
+    res.status(200).json({
+        status: 'success',
+        count: reports.length,
+        data: { reports }
+    });
+});
+
+/**
+ * DELETE /api/reports/multi/:reportId
+ * Delete a multi-run report
+ */
+exports.deleteMultiRunReport = catchAsync(async (req, res, next) => {
+    const { reportId } = req.params;
+    const reportDir = path.join(dataDir, 'reports', reportId);
+
+    try {
+        await fs.promises.rm(reportDir, { recursive: true, force: true });
+        res.status(204).send();
+    } catch (err) {
+        return next(new AppError(`Failed to delete report: ${err.message}`, 500));
+    }
+});

@@ -14,7 +14,7 @@ const {
  * Aggregates peer connections from all nodes and builds a graph from database
  */
 exports.getPeerTopology = catchAsync(async (req, res, next) => {
-    const runId = parseInt(req.params.runId);
+    const runId = parseInt(req.query.runId);
     if (isNaN(runId)) {
         return next(new AppError('Invalid runId', 400));
     }

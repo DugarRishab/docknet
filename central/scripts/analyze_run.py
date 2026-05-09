@@ -242,6 +242,7 @@ def compute_consistency(df_tx: pd.DataFrame) -> Dict[str, Any]:
     """
     Compute tangle consistency across nodes.
     Ported from reportController.js:54-163
+    Optimized for large datasets with vectorized operations.
     """
     if df_tx.empty:
         return {
@@ -258,61 +259,71 @@ def compute_consistency(df_tx: pd.DataFrame) -> Dict[str, Any]:
             "partial_count": 0,
         }
     
-    # Get unique nodes
-    nodes = df_tx[["node_index", "node_original_id"]].drop_duplicates().to_dict("records")
-    node_ids = [n["node_index"] for n in nodes]
+    # Get unique nodes (vectorized)
+    node_ids = sorted(df_tx["node_index"].unique().tolist())
+    node_set = set(node_ids)
+    total_unique = len(df_tx["transaction_id"].unique())
     
-    # Group by transaction_id
-    tx_by_id = df_tx.groupby("transaction_id")
+    # Pre-compute replication status (vectorized)
+    replication_counts = df_tx.groupby("transaction_id")["node_index"].nunique()
+    fully_replicated = replication_counts[replication_counts == len(node_ids)].index.tolist()
+    partially_replicated_ids = replication_counts[replication_counts < len(node_ids)].index.tolist()
     
-    fully_replicated = []
+    # Build partially_replicated list efficiently
     partially_replicated = []
+    if partially_replicated_ids:
+        partial_groups = df_tx[df_tx["transaction_id"].isin(partially_replicated_ids)].groupby("transaction_id")
+        for tx_id, group in partial_groups:
+            present = group["node_index"].unique().tolist()
+            missing = [nid for nid in node_ids if nid not in present]
+            partially_replicated.append({
+                "tx_id": tx_id,
+                "present_in": present,
+                "missing_from": missing
+            })
+    
+    # Only check conflicts for transactions with multiple versions (vectorized)
+    multi_version_ids = replication_counts[replication_counts > 1].index.tolist()
+    
     parent_conflicts = []
     signature_conflicts = []
     data_conflicts = []
     weight_diffs = []
     consensus_diffs = []
     
-    for tx_id, group in tx_by_id:
-        present_node_ids = group["node_index"].tolist()
-        missing = [nid for nid in node_ids if nid not in present_node_ids]
+    if multi_version_ids:
+        multi_df = df_tx[df_tx["transaction_id"].isin(multi_version_ids)]
+        multi_groups = multi_df.groupby("transaction_id")
         
-        if not missing:
-            fully_replicated.append(tx_id)
-        else:
-            partially_replicated.append({
-                "tx_id": tx_id,
-                "present_in": present_node_ids,
-                "missing_from": missing
-            })
-        
-        # Check for conflicts (only if multiple versions exist)
-        if len(group) > 1:
-            # Parent conflicts
-            parents_str = group["parents"].apply(lambda p: json.dumps(sorted(p)) if p else "").tolist()
-            if len(set(parents_str)) > 1:
-                parent_conflicts.append({
-                    "tx_id": tx_id,
-                    "versions": group[["node_index", "parents"]].to_dict("records")
-                })
+        for tx_id, group in multi_groups:
+            # Parent conflicts (vectorized)
+            if "parents" in group.columns:
+                parents_set = set()
+                for p in group["parents"]:
+                    if p:
+                        parents_set.add(json.dumps(sorted(p)))
+                if len(parents_set) > 1:
+                    parent_conflicts.append({
+                        "tx_id": tx_id,
+                        "versions": group[["node_index", "parents"]].to_dict("records")
+                    })
             
             # Signature conflicts
             if "signature1" in group.columns and "signature2" in group.columns:
-                sig1_set = group["signature1"].dropna().unique()
-                sig2_set = group["signature2"].dropna().unique()
-                if len(sig1_set) > 1 or len(sig2_set) > 1:
+                sig1_unique = group["signature1"].dropna().nunique()
+                sig2_unique = group["signature2"].dropna().nunique()
+                if sig1_unique > 1 or sig2_unique > 1:
                     signature_conflicts.append({
                         "tx_id": tx_id,
                         "versions": group[["node_index", "signature1", "signature2"]].fillna("").to_dict("records")
                     })
             
-            # Data conflicts (sender, receiver, amount)
+            # Data conflicts (sender, receiver, amount) - vectorized
             if all(col in group.columns for col in ["sender", "receiver", "amount"]):
-                data_str = group.apply(
-                    lambda r: f"{r.get('sender', '')}|{r.get('receiver', '')}|{r.get('amount', '')}",
-                    axis=1
-                ).tolist()
-                if len(set(data_str)) > 1:
+                data_tuples = set()
+                for _, row in group[["sender", "receiver", "amount"]].iterrows():
+                    data_tuples.add((str(row.get("sender", "")), str(row.get("receiver", "")), str(row.get("amount", ""))))
+                if len(data_tuples) > 1:
                     data_conflicts.append({
                         "tx_id": tx_id,
                         "versions": group[["node_index", "sender", "receiver", "amount"]].fillna("").to_dict("records")
@@ -320,8 +331,8 @@ def compute_consistency(df_tx: pd.DataFrame) -> Dict[str, Any]:
             
             # Weight differences
             if "cumulative_weight" in group.columns:
-                weights = group["cumulative_weight"].dropna().unique()
-                if len(weights) > 1:
+                weight_unique = group["cumulative_weight"].dropna().nunique()
+                if weight_unique > 1:
                     weight_diffs.append({
                         "tx_id": tx_id,
                         "versions": group[["node_index", "cumulative_weight"]].dropna().to_dict("records")
@@ -329,14 +340,13 @@ def compute_consistency(df_tx: pd.DataFrame) -> Dict[str, Any]:
             
             # Consensus timestamp differences
             if "consensus_timestamp" in group.columns:
-                consensus_times = group["consensus_timestamp"].dropna().unique()
-                if len(consensus_times) > 1:
+                consensus_unique = group["consensus_timestamp"].dropna().nunique()
+                if consensus_unique > 1:
                     consensus_diffs.append({
                         "tx_id": tx_id,
                         "versions": group[["node_index", "consensus_timestamp"]].dropna().to_dict("records")
                     })
     
-    total_unique = len(df_tx["transaction_id"].unique())
     score = (len(fully_replicated) / total_unique * 100) if total_unique > 0 else 100
     
     return {

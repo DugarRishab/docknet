@@ -8,7 +8,7 @@ const {
 const router = express.Router();
 
 // Get peer network topology for a run
-router.get('/runs/:runId/topology', getPeerTopology);
+router.get('/topology', getPeerTopology);
 
 // Get live node status for a run
 router.get('/runs/:runId/nodes/status', getNodeStatus);

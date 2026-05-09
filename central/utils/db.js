@@ -160,6 +160,29 @@ db.serialize(() => {
         )
     `);
 
+	// Simulation queue table
+	db.run(`
+        CREATE TABLE IF NOT EXISTS simulation_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            position INTEGER NOT NULL,
+            label TEXT,
+            node_count INTEGER NOT NULL,
+            tx_count INTEGER NOT NULL,
+            tx_delay INTEGER NOT NULL,
+            max_peers INTEGER NOT NULL,
+            pow INTEGER NOT NULL,
+            wait INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending','started','completed','error')) DEFAULT 'pending',
+            run_id INTEGER,
+            error_message TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            completed_at DATETIME
+        )
+    `);
+	db.run(`CREATE INDEX IF NOT EXISTS idx_simulation_queue_status_position ON simulation_queue(status, position)`);
+	db.run(`CREATE INDEX IF NOT EXISTS idx_simulation_queue_run_id ON simulation_queue(run_id)`);
+
 	// Indexes for performance
 	db.run(`CREATE INDEX IF NOT EXISTS idx_transactions_tx_id ON transactions(transaction_id)`);
 	db.run(`CREATE INDEX IF NOT EXISTS idx_transactions_node_id ON transactions(node_id)`);
@@ -270,8 +293,8 @@ async function updateRunCompletionStatus(internalRunId) {
 			// Update if changed
 			if (newStatus !== run.status) {
 				db.run(
-					`UPDATE runs SET status = ?, nodes_reported = ? WHERE id = ?`,
-					[newStatus, nodesReported, internalRunId],
+					`UPDATE runs SET status = ?, nodes_reported = ?, ended_at = CASE WHEN ? = 'complete' AND ended_at IS NULL THEN CURRENT_TIMESTAMP ELSE ended_at END WHERE id = ?`,
+					[newStatus, nodesReported, newStatus, internalRunId],
 					(err) => {
 						if (err) reject(err);
 						else resolve({
@@ -308,10 +331,36 @@ async function updateRunCompletionStatus(internalRunId) {
 function listRuns() {
 	return new Promise((resolve, reject) => {
 		db.all(
-			`SELECT r.*, COUNT(DISTINCT n.id) as node_count 
-			 FROM runs r 
-			 LEFT JOIN nodes n ON r.id = n.run_id 
-			 GROUP BY r.id 
+			`SELECT
+				r.id,
+				r.run_id,
+				r.started_at,
+				r.ended_at,
+				r.status,
+				r.nodes_expected,
+				r.nodes_reported,
+				COUNT(DISTINCT n.id) AS node_count,
+				p.tx_count   AS tx_count,
+				p.tx_delay   AS tx_delay,
+				p.max_peers  AS max_peers,
+				p.pow        AS pow,
+				p.wait       AS wait,
+				CASE
+					WHEN r.ended_at IS NOT NULL
+					THEN CAST((julianday(r.ended_at) - julianday(r.started_at)) * 86400000 AS INTEGER)
+					ELSE NULL
+				END AS duration,
+				COUNT(DISTINCT t.transaction_id) AS total_transactions,
+				CASE
+					WHEN r.nodes_reported > 0
+					THEN CAST(COUNT(DISTINCT t.transaction_id) AS REAL) / r.nodes_reported
+					ELSE 0
+				END AS actual_tx_per_node
+			 FROM runs r
+			 LEFT JOIN nodes n      ON r.id = n.run_id
+			 LEFT JOIN run_params p ON r.id = p.run_id
+			 LEFT JOIN transactions t ON n.id = t.node_id
+			 GROUP BY r.id
 			 ORDER BY r.started_at DESC`,
 			(err, rows) => {
 				if (err) reject(err);
@@ -322,6 +371,91 @@ function listRuns() {
 }
 
 // Node management
+/**
+ * Query runs with flexible filter criteria for multi-run analysis
+ * @param {Object} filters - Filter criteria
+ * @param {Array} [filters.nodeRange] - [min, max] node count range
+ * @param {Array} [filters.txRange] - [min, max] tx count range
+ * @param {number} [filters.txDelay] - Transaction delay
+ * @param {number} [filters.maxPeers] - Max peers per node
+ * @param {number} [filters.pow] - PoW difficulty
+ * @param {number} [filters.wait] - Wait period
+ * @param {string} [filters.status] - Run status
+ * @param {string} [filters.dateFrom] - Start date (YYYY-MM-DD)
+ * @param {string} [filters.dateTo] - End date (YYYY-MM-DD)
+ */
+function queryRunsByFilters(filters = {}) {
+	return new Promise((resolve, reject) => {
+		let conditions = ['1=1'];
+		let params = [];
+
+		if (filters.nodeRange && Array.isArray(filters.nodeRange) && filters.nodeRange.length === 2) {
+			conditions.push('p.node_count BETWEEN ? AND ?');
+			params.push(filters.nodeRange[0], filters.nodeRange[1]);
+		}
+		if (filters.txRange && Array.isArray(filters.txRange) && filters.txRange.length === 2) {
+			conditions.push('p.tx_count BETWEEN ? AND ?');
+			params.push(filters.txRange[0], filters.txRange[1]);
+		}
+		if (filters.txDelay != null) {
+			conditions.push('p.tx_delay = ?');
+			params.push(filters.txDelay);
+		}
+		if (filters.maxPeers != null) {
+			conditions.push('p.max_peers = ?');
+			params.push(filters.maxPeers);
+		}
+		if (filters.pow != null) {
+			conditions.push('p.pow = ?');
+			params.push(filters.pow);
+		}
+		if (filters.wait != null) {
+			conditions.push('p.wait = ?');
+			params.push(filters.wait);
+		}
+		if (filters.status) {
+			conditions.push('r.status = ?');
+			params.push(filters.status);
+		}
+		if (filters.dateFrom) {
+			conditions.push('r.started_at >= ?');
+			params.push(filters.dateFrom);
+		}
+		if (filters.dateTo) {
+			conditions.push('r.started_at <= ?');
+			params.push(filters.dateTo);
+		}
+
+		const whereClause = conditions.join(' AND ');
+
+		db.all(
+			`SELECT
+				r.id,
+				r.run_id,
+				r.started_at,
+				r.ended_at,
+				r.status,
+				r.nodes_expected,
+				r.nodes_reported,
+				p.node_count  AS param_node_count,
+				p.tx_count    AS param_tx_count,
+				p.tx_delay    AS param_tx_delay,
+				p.max_peers   AS param_max_peers,
+				p.pow         AS param_pow,
+				p.wait        AS param_wait
+			 FROM runs r
+			 LEFT JOIN run_params p ON r.id = p.run_id
+			 WHERE ${whereClause}
+			 ORDER BY r.started_at DESC`,
+			params,
+			(err, rows) => {
+				if (err) reject(err);
+				else resolve(rows);
+			}
+		);
+	});
+}
+
 function getOrCreateNode(runId, originalNodeId, nodeIp) {
 	return new Promise((resolve, reject) => {
 		// First get the run's internal ID
@@ -685,7 +819,7 @@ function getNodeDetailsWithCounts(runId) {
 				n.node_index,
 				n.node_ip,
 				n.created_at,
-				COUNT(DISTINCT t.id) as transaction_count,
+				COUNT(DISTINCT t.transaction_id) as transaction_count,
 				COUNT(DISTINCT p.id) as peer_count,
 				CASE WHEN COUNT(DISTINCT m.id) > 0 THEN 1 ELSE 0 END as has_metrics
 			 FROM nodes n
@@ -711,7 +845,7 @@ function getRunSummary(runId) {
 			`SELECT
 			    r.*,
 			    COUNT(DISTINCT n.id) as total_nodes,
-			    COUNT(DISTINCT t.id) as total_transactions,
+			    COUNT(DISTINCT t.transaction_id) as total_transactions,
 			    COUNT(DISTINCT p.id) as total_peer_records,
 			    COUNT(DISTINCT m.id) as total_metrics_records
 			 FROM runs r
@@ -949,6 +1083,15 @@ async function saveTelemetryBatch(runId, nodeId, nodeIp, data) {
 			completionStatus = await updateRunCompletionStatus(run.id);
 			if (completionStatus.updated) {
 				console.log(`[saveTelemetryBatch] Run ${runId} status changed: ${completionStatus.oldStatus} -> ${completionStatus.newStatus} (${completionStatus.nodesReported}/${completionStatus.nodesExpected} nodes)`);
+				// Trigger queue runner when run completes
+				if (completionStatus.newStatus === 'complete') {
+					try {
+						const { onRunComplete } = require('./queueRunner');
+						onRunComplete(runId);
+					} catch (e) {
+						console.error('[saveTelemetryBatch] queueRunner.onRunComplete failed:', e);
+					}
+				}
 			}
 		} catch (err) {
 			console.error('[saveTelemetryBatch] Failed to update run completion status:', err);
@@ -1321,6 +1464,205 @@ async function deleteRunAtomic(runId) {
 	});
 }
 
+// ========== SIMULATION QUEUE ==========
+
+function addQueueItem({ label, node_count, tx_count, tx_delay, max_peers, pow, wait }) {
+	return new Promise((resolve, reject) => {
+		const stmt = db.prepare(`
+            INSERT INTO simulation_queue (position, label, node_count, tx_count, tx_delay, max_peers, pow, wait)
+            VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM simulation_queue WHERE status='pending'), ?, ?, ?, ?, ?, ?, ?)
+        `);
+		stmt.run(label, node_count, tx_count, tx_delay, max_peers, pow, wait, function(err) {
+			if (err) {
+				stmt.finalize();
+				return reject(err);
+			}
+			db.get(`SELECT * FROM simulation_queue WHERE id = ?`, [this.lastID], (err, row) => {
+				stmt.finalize();
+				if (err) reject(err);
+				else resolve(row);
+			});
+		});
+	});
+}
+
+function listQueue({ status } = {}) {
+	return new Promise((resolve, reject) => {
+		let sql = `
+            SELECT * FROM simulation_queue
+            ORDER BY
+                CASE status
+                    WHEN 'started' THEN 0
+                    WHEN 'pending' THEN 1
+                    ELSE 2
+                END,
+                position ASC,
+                id ASC
+        `;
+		const params = [];
+		if (status) {
+			sql = `SELECT * FROM simulation_queue WHERE status = ? ORDER BY position ASC, id ASC`;
+			params.push(status);
+		}
+		db.all(sql, params, (err, rows) => {
+			if (err) reject(err);
+			else resolve(rows);
+		});
+	});
+}
+
+function getQueueItem(id) {
+	return new Promise((resolve, reject) => {
+		db.get(`SELECT * FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
+			if (err) reject(err);
+			else resolve(row);
+		});
+	});
+}
+
+function removeQueueItem(id) {
+	return new Promise((resolve, reject) => {
+		// Only allow deleting pending items
+		db.get(`SELECT status FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
+			if (err) return reject(err);
+			if (!row) return reject(new Error(`Queue item ${id} not found`));
+			if (row.status !== 'pending') return reject(new Error(`Cannot delete queue item with status '${row.status}'`));
+			db.run(`DELETE FROM simulation_queue WHERE id = ?`, [id], function(err) {
+				if (err) reject(err);
+				else resolve({ changes: this.changes });
+			});
+		});
+	});
+}
+
+function reorderQueue(orderedIds) {
+	return withTransaction(async () => {
+		for (let i = 0; i < orderedIds.length; i++) {
+			const id = orderedIds[i];
+			await new Promise((resolve, reject) => {
+				// Verify status is still pending
+				db.get(`SELECT status FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
+					if (err) return reject(err);
+					if (!row) return reject(new Error(`Queue item ${id} not found`));
+					if (row.status !== 'pending') return reject(new Error(`Cannot reorder queue item with status '${row.status}'`));
+					db.run(`UPDATE simulation_queue SET position = ? WHERE id = ?`, [i + 1, id], (err2) => {
+						if (err2) reject(err2);
+						else resolve();
+					});
+				});
+			});
+		}
+		return { reordered: orderedIds.length };
+	});
+}
+
+function getNextPending() {
+	return new Promise((resolve, reject) => {
+		db.get(`SELECT * FROM simulation_queue WHERE status='pending' ORDER BY position ASC, id ASC LIMIT 1`, [], (err, row) => {
+			if (err) reject(err);
+			else resolve(row);
+		});
+	});
+}
+
+function markQueueStarted(id, runId) {
+	return new Promise((resolve, reject) => {
+		db.run(
+			`UPDATE simulation_queue SET status='started', run_id=?, started_at=CURRENT_TIMESTAMP WHERE id = ?`,
+			[runId, id],
+			function(err) {
+				if (err) reject(err);
+				else resolve({ changes: this.changes });
+			}
+		);
+	});
+}
+
+function markQueueCompleted(id) {
+	return new Promise((resolve, reject) => {
+		db.run(
+			`UPDATE simulation_queue SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id = ?`,
+			[id],
+			function(err) {
+				if (err) reject(err);
+				else resolve({ changes: this.changes });
+			}
+		);
+	});
+}
+
+function markQueueError(id, errorMessage) {
+	return new Promise((resolve, reject) => {
+		db.run(
+			`UPDATE simulation_queue SET status='error', error_message=?, completed_at=CURRENT_TIMESTAMP WHERE id = ?`,
+			[errorMessage, id],
+			function(err) {
+				if (err) reject(err);
+				else resolve({ changes: this.changes });
+			}
+		);
+	});
+}
+
+function updateQueueItem(id, { label, node_count, tx_count, tx_delay, max_peers, pow, wait }) {
+	return new Promise((resolve, reject) => {
+		// Only allow updating pending items
+		db.get(`SELECT status FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
+			if (err) return reject(err);
+			if (!row) return reject(new Error(`Queue item ${id} not found`));
+			if (row.status !== 'pending') return reject(new Error(`Cannot update queue item with status '${row.status}'`));
+
+			const stmt = db.prepare(`
+				UPDATE simulation_queue
+				SET label = ?, node_count = ?, tx_count = ?, tx_delay = ?, max_peers = ?, pow = ?, wait = ?
+				WHERE id = ?
+			`);
+			stmt.run(label, node_count, tx_count, tx_delay, max_peers, pow, wait, id, function(err) {
+				if (err) {
+					stmt.finalize();
+					return reject(err);
+				}
+				db.get(`SELECT * FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
+					stmt.finalize();
+					if (err) reject(err);
+					else resolve(row);
+				});
+			});
+		});
+	});
+}
+
+function findQueueItemByRunId(runId) {
+	return new Promise((resolve, reject) => {
+		db.get(`SELECT * FROM simulation_queue WHERE run_id = ? AND status='started'`, [runId], (err, row) => {
+			if (err) reject(err);
+			else resolve(row);
+		});
+	});
+}
+
+function findStuckStartedItems() {
+	return new Promise((resolve, reject) => {
+		db.all(`SELECT * FROM simulation_queue WHERE status='started'`, [], (err, rows) => {
+			if (err) reject(err);
+			else resolve(rows);
+		});
+	});
+}
+
+function preemptStartedQueueItems() {
+	return new Promise((resolve, reject) => {
+		db.run(
+			`UPDATE simulation_queue SET status='error', error_message='preempted by manual start', completed_at=CURRENT_TIMESTAMP WHERE status='started'`,
+			[],
+			function(err) {
+				if (err) reject(err);
+				else resolve({ changes: this.changes });
+			}
+		);
+	});
+}
+
 module.exports = {
 	db,
 	withTransaction,
@@ -1328,7 +1670,22 @@ module.exports = {
 	getOrCreateRun,
 	completeRun,
 	listRuns,
+	queryRunsByFilters,
 	deleteRunAtomic,
+	// Simulation queue
+	addQueueItem,
+	listQueue,
+	getQueueItem,
+	removeQueueItem,
+	updateQueueItem,
+	reorderQueue,
+	getNextPending,
+	markQueueStarted,
+	markQueueCompleted,
+	markQueueError,
+	findQueueItemByRunId,
+	findStuckStartedItems,
+	preemptStartedQueueItems,
 	// Node management
 	getOrCreateNode,
 	listNodes,

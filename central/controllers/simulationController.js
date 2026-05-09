@@ -1,7 +1,7 @@
 // central/controllers/simulationController.js
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
-const { getOrCreateRun, insertRunParams, saveTelemetryBatch } = require('../utils/db');
+const { getOrCreateRun, insertRunParams, saveTelemetryBatch, preemptStartedQueueItems } = require('../utils/db');
 const Docker = require('dockerode');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
@@ -11,11 +11,97 @@ const SHARED_VOLUME = 'program-files';
 const TELEMETRY_ENDPOINT = process.env.TELEMETRY_ENDPOINT || 'http://172.25.0.10:8000/api/ingest/telemetry';
 
 /**
+ * Internal: Launch simulation with validated params
+ * Returns { runId } on success
+ */
+async function launchSimulation({ nodeCount, txCount, txDelay, maxPeers, pow, wait, runId: providedRunId }) {
+	// Validate inputs (defensive, should already be validated by caller)
+	if (isNaN(nodeCount) || nodeCount < 1) throw new Error('Invalid node_count');
+	if (isNaN(txCount) || txCount < 1) throw new Error('Invalid tx_count');
+	if (isNaN(txDelay) || txDelay < 0) throw new Error('Invalid tx_delay');
+	if (isNaN(maxPeers) || maxPeers < 1) throw new Error('Invalid max_peers');
+
+	let powVal = parseInt(pow);
+	if (isNaN(powVal)) powVal = 3;
+	if (powVal < 1 || powVal > 5) throw new Error('Invalid pow');
+
+	let waitVal = parseInt(wait);
+	if (isNaN(waitVal)) waitVal = 300;
+
+	let runId = providedRunId ? parseInt(providedRunId) : 0;
+	if (!runId || isNaN(runId) || runId <= 0) {
+		runId = Math.floor(Date.now() / 1000);
+	}
+
+	// Save run params BEFORE starting containers (single source of truth)
+	await getOrCreateRun(runId);
+	await insertRunParams(runId, {
+		node_count: nodeCount,
+		tx_count: txCount,
+		tx_delay: txDelay,
+		max_peers: maxPeers,
+		pow: powVal,
+		wait: waitVal
+	});
+	console.log(`[launchSimulation] Saved run params for run ${runId}`);
+
+	// Remove all existing worker containers
+	try {
+		const existing = await docker.listContainers({
+			all: true,
+			filters: { name: ['^docknet-worker'] },
+		});
+		await Promise.all(
+			existing.map((c) => docker.getContainer(c.Id).remove({ force: true }))
+		);
+	} catch (err) {
+		console.warn('[launchSimulation] Warning: failed to clean up existing containers:', err.message);
+	}
+
+	// Launch new workers
+	const promises = [];
+	for (let i = 1; i <= nodeCount; i++) {
+		const name = `docknet-worker-${i}`;
+		promises.push(
+			docker
+				.createContainer({
+					name,
+					Image: 'docknet/worker:latest',
+					Env: [
+						`NODE_ID=worker${i}`,
+						`TELEMETRY_ENDPOINT=${TELEMETRY_ENDPOINT}`,
+						`REPO_URL=https://github.com/DugarRishab/tangle-sg`,
+						`REPO_BRANCH=monitor`,
+						`TX_COUNT=${txCount}`,
+						`TX_DELAY=${txDelay}`,
+						`MAX_PEERS=${maxPeers}`,
+						`POW=${powVal}`,
+						`RUN_ID=${runId}`,
+						`WAIT_PERIOD=${waitVal}`,
+					],
+					HostConfig: {
+						NetworkMode: 'docknet_docknet',
+						Binds: [`${SHARED_VOLUME}:/app/program:ro`],
+					},
+				})
+				.then((container) => container.start())
+		);
+	}
+
+	await Promise.all(promises);
+
+	return { runId };
+}
+
+// Export for use by queue runner
+exports.launchSimulation = launchSimulation;
+
+/**
  * Start a new simulation with specified parameters
  * POST /api/simulations/start
  */
 exports.startSimulation = catchAsync(async (req, res, next) => {
-	const { node_count, tx_count, tx_delay, max_peers, pow, run, wait } = req.query;
+	const { node_count, tx_count, tx_delay, max_peers, pow, run, wait } = req.body;
 
 	// Strict validation
 	const nodeCount = parseInt(node_count);
@@ -49,83 +135,36 @@ exports.startSimulation = catchAsync(async (req, res, next) => {
 	let waitVal = parseInt(wait);
 	if (isNaN(waitVal)) waitVal = 300;
 
-	// Handle run ID: reject 0
-	const runId = parseInt(run) || 0;
-	if (runId === 0) {
-		return next(new AppError('Invalid run: must provide a non-zero run ID', 400));
+	// Handle run ID: generate if not provided
+	let runId = run ? parseInt(run) : 0;
+	if (!runId || isNaN(runId) || runId <= 0) {
+		runId = Math.floor(Date.now() / 1000);
 	}
 
-	// Save run params BEFORE starting containers (single source of truth)
-	let runRecord;
+	// Preempt any started queue items (manual start takes precedence)
 	try {
-		runRecord = await getOrCreateRun(runId);
-		await insertRunParams(runId, {
-			node_count: nodeCount,
-			tx_count: txCount,
-			tx_delay: txDelay,
-			max_peers: maxPeers,
-			pow: powVal,
-			wait: waitVal
-		});
-		console.log(`[startSimulation] Saved run params for run ${runId}`);
+		await preemptStartedQueueItems();
+		console.log('[startSimulation] Preempted any started queue items');
 	} catch (err) {
-		return next(new AppError(`Failed to save run params: ${err.message}`, 500));
+		console.warn('[startSimulation] Failed to preempt queue items:', err.message);
 	}
 
-	// Remove all existing worker containers
-	try {
-		const existing = await docker.listContainers({
-			all: true,
-			filters: { name: ['^docknet-worker'] },
-		});
-		await Promise.all(
-			existing.map((c) => docker.getContainer(c.Id).remove({ force: true }))
-		);
-	} catch (err) {
-		console.warn('[startSimulation] Warning: failed to clean up existing containers:', err.message);
-	}
-
-	// Launch new workers
-	const promises = [];
-	for (let i = 1; i <= nodeCount; i++) {
-		const name = `docknet-worker-${i}`;
-		promises.push(
-			docker
-				.createContainer({
-					name,
-					Image: 'docknet/worker:latest',
-					Env: [
-						`NODE_ID=worker${i}`,
-						`TELEMETRY_ENDPOINT=${TELEMETRY_ENDPOINT}`,
-						`REPO_URL=https://github.com/DugarRishab/tangle-sg`,
-						`REPO_BRANCH=monitor`,
-						`TX_COUNT=${txCount}`,
-						`TX_DELAY=${txDelay}`,
-						`MAX_PEERS=${maxPeers}`,
-						`POW=${powVal}`,
-						`RUN_ID=${runId}`,
-						`WAIT_PERIOD=${waitVal}`,
-					],
-					HostConfig: {
-						NetworkMode: 'docknet_docknet',
-						Binds: [`${SHARED_VOLUME}:/app/program:ro`],
-					},
-				})
-				.then((container) => container.start())
-		);
-	}
-
-	try {
-		await Promise.all(promises);
-	} catch (err) {
-		return next(new AppError(`Failed to start workers: ${err.message}`, 500));
-	}
+	// Launch the simulation
+	const result = await launchSimulation({
+		nodeCount,
+		txCount,
+		txDelay,
+		maxPeers,
+		pow: powVal,
+		wait: waitVal,
+		runId
+	});
 
 	res.status(200).json({
 		status: 'success',
 		data: {
 			message: `${nodeCount} workers started`,
-			runId: runId,
+			runId: result.runId,
 			params: {
 				nodeCount,
 				txCount,
