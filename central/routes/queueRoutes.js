@@ -2,6 +2,7 @@
 const express = require('express');
 const {
 	addQueue,
+	bulkAddQueue,
 	listQueue,
 	removeQueue,
 	updateQueue,
@@ -14,6 +15,7 @@ const router = express.Router();
 
 // Queue CRUD
 router.post('/', addQueue);
+router.post('/bulk', bulkAddQueue);
 router.get('/', listQueue);
 router.patch('/:id', updateQueue);
 router.delete('/:id', removeQueue);

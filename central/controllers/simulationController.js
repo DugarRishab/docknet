@@ -14,16 +14,12 @@ const TELEMETRY_ENDPOINT = process.env.TELEMETRY_ENDPOINT || 'http://172.25.0.10
  * Internal: Launch simulation with validated params
  * Returns { runId } on success
  */
-async function launchSimulation({ nodeCount, txCount, txDelay, maxPeers, pow, wait, runId: providedRunId }) {
+async function launchSimulation({ nodeCount, txCount, txDelay, maxPeers, wait, runId: providedRunId, orphanTtl, orphanPoolMax, rateLimitBase, rateLimitBurst, rateLimitWindow, monitorPeriod, label }) {
 	// Validate inputs (defensive, should already be validated by caller)
 	if (isNaN(nodeCount) || nodeCount < 1) throw new Error('Invalid node_count');
 	if (isNaN(txCount) || txCount < 1) throw new Error('Invalid tx_count');
 	if (isNaN(txDelay) || txDelay < 0) throw new Error('Invalid tx_delay');
 	if (isNaN(maxPeers) || maxPeers < 1) throw new Error('Invalid max_peers');
-
-	let powVal = parseInt(pow);
-	if (isNaN(powVal)) powVal = 3;
-	if (powVal < 1 || powVal > 5) throw new Error('Invalid pow');
 
 	let waitVal = parseInt(wait);
 	if (isNaN(waitVal)) waitVal = 300;
@@ -34,14 +30,19 @@ async function launchSimulation({ nodeCount, txCount, txDelay, maxPeers, pow, wa
 	}
 
 	// Save run params BEFORE starting containers (single source of truth)
-	await getOrCreateRun(runId);
+	await getOrCreateRun(runId, label || null);
 	await insertRunParams(runId, {
 		node_count: nodeCount,
 		tx_count: txCount,
 		tx_delay: txDelay,
 		max_peers: maxPeers,
-		pow: powVal,
-		wait: waitVal
+		wait: waitVal,
+		orphan_ttl: orphanTtl || 600,
+		orphan_pool_max: orphanPoolMax || 1000,
+		rate_limit_base: rateLimitBase || 10.0,
+		rate_limit_burst: rateLimitBurst || 20.0,
+		rate_limit_window_sec: rateLimitWindow || 60,
+		monitor_period: monitorPeriod || 5
 	});
 	console.log(`[launchSimulation] Saved run params for run ${runId}`);
 
@@ -75,9 +76,15 @@ async function launchSimulation({ nodeCount, txCount, txDelay, maxPeers, pow, wa
 						`TX_COUNT=${txCount}`,
 						`TX_DELAY=${txDelay}`,
 						`MAX_PEERS=${maxPeers}`,
-						`POW=${powVal}`,
+						`TOTAL_NODES=${nodeCount}`,
 						`RUN_ID=${runId}`,
 						`WAIT_PERIOD=${waitVal}`,
+						`MONITOR_PERIOD=${monitorPeriod || 5}`,
+						`ORPHAN_TTL_SEC=${orphanTtl || 600}`,
+						`ORPHAN_POOL_MAX=${orphanPoolMax || 1000}`,
+						`RATE_LIMIT_BASE=${rateLimitBase || 10.0}`,
+						`RATE_LIMIT_BURST=${rateLimitBurst || 20.0}`,
+						`RATE_LIMIT_WINDOW_SEC=${rateLimitWindow || 60}`,
 					],
 					HostConfig: {
 						NetworkMode: 'docknet_docknet',
@@ -101,7 +108,9 @@ exports.launchSimulation = launchSimulation;
  * POST /api/simulations/start
  */
 exports.startSimulation = catchAsync(async (req, res, next) => {
-	const { node_count, tx_count, tx_delay, max_peers, pow, run, wait } = req.body;
+	const { node_count, tx_count, tx_delay, max_peers, run, wait, label,
+	        orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window,
+	        monitor_period } = req.body;
 
 	// Strict validation
 	const nodeCount = parseInt(node_count);
@@ -122,13 +131,6 @@ exports.startSimulation = catchAsync(async (req, res, next) => {
 	const maxPeers = parseInt(max_peers);
 	if (isNaN(maxPeers) || maxPeers < 1) {
 		return next(new AppError('Invalid max_peers: must be a positive integer', 400));
-	}
-
-	// Handle pow: default 3, range 1-5
-	let powVal = parseInt(pow);
-	if (isNaN(powVal)) powVal = 3;
-	if (powVal < 1 || powVal > 5) {
-		return next(new AppError('Invalid pow: must be between 1 and 5', 400));
 	}
 
 	// Handle wait period: default 300
@@ -155,9 +157,15 @@ exports.startSimulation = catchAsync(async (req, res, next) => {
 		txCount,
 		txDelay,
 		maxPeers,
-		pow: powVal,
 		wait: waitVal,
-		runId
+		runId,
+		label: label || null,
+		orphanTtl: orphan_ttl,
+		orphanPoolMax: orphan_pool_max,
+		rateLimitBase: rate_limit_base,
+		rateLimitBurst: rate_limit_burst,
+		rateLimitWindow: rate_limit_window,
+		monitorPeriod: monitor_period
 	});
 
 	res.status(200).json({
@@ -170,8 +178,13 @@ exports.startSimulation = catchAsync(async (req, res, next) => {
 				txCount,
 				txDelay,
 				maxPeers,
-				pow: powVal,
-				wait: waitVal
+				wait: waitVal,
+				orphanTtl: orphan_ttl || 600,
+				orphanPoolMax: orphan_pool_max || 1000,
+				rateLimitBase: rate_limit_base || 10.0,
+				rateLimitBurst: rate_limit_burst || 20.0,
+				rateLimitWindow: rate_limit_window || 60,
+				monitorPeriod: monitor_period || 5
 			}
 		}
 	});

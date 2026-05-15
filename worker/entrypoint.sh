@@ -10,8 +10,9 @@ fi
 
 # 2. Build the tangle-sg binary
 cd /app/tangle-sg
-# Assuming your repo has a Makefile that produces `tangle_poc`
-./install.sh
+# Docker-specific install script (apt deps + make)
+chmod +x ./install-docker.sh
+./install-docker.sh
 
 # print all IPv4 addresses on this host
 echo "[INFO] My IP(s): $(hostname -I)"

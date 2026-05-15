@@ -3,6 +3,7 @@ const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
 const {
 	addQueueItem,
+	addQueueItemsBulk,
 	listQueue,
 	getQueueItem,
 	removeQueueItem,
@@ -19,7 +20,9 @@ const { launchNextPending, preemptStarted } = require('../utils/queueRunner');
  * POST /api/simulations/queue
  */
 exports.addQueue = catchAsync(async (req, res, next) => {
-	const { label, node_count, tx_count, tx_delay, max_peers, pow, wait } = req.body;
+	const { label, node_count, tx_count, tx_delay, max_peers, wait,
+	        orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window,
+	        monitor_period } = req.body;
 
 	// Validate required params
 	const nodeCount = parseInt(node_count);
@@ -42,13 +45,6 @@ exports.addQueue = catchAsync(async (req, res, next) => {
 		return next(new AppError('Invalid max_peers: must be a positive integer', 400));
 	}
 
-	// Handle pow: default 3, range 1-5
-	let powVal = parseInt(pow);
-	if (isNaN(powVal)) powVal = 3;
-	if (powVal < 1 || powVal > 5) {
-		return next(new AppError('Invalid pow: must be between 1 and 5', 400));
-	}
-
 	// Handle wait period: default 300
 	let waitVal = parseInt(wait);
 	if (isNaN(waitVal)) waitVal = 300;
@@ -59,8 +55,13 @@ exports.addQueue = catchAsync(async (req, res, next) => {
 		tx_count: txCount,
 		tx_delay: txDelay,
 		max_peers: maxPeers,
-		pow: powVal,
-		wait: waitVal
+		wait: waitVal,
+		orphan_ttl: orphan_ttl || 600,
+		orphan_pool_max: orphan_pool_max || 1000,
+		rate_limit_base: rate_limit_base || 10.0,
+		rate_limit_burst: rate_limit_burst || 20.0,
+		rate_limit_window_sec: rate_limit_window || 60,
+		monitor_period: monitor_period || 5
 	});
 
 	res.status(201).json({
@@ -131,7 +132,9 @@ exports.updateQueue = catchAsync(async (req, res, next) => {
 		return next(new AppError('Invalid queue item ID', 400));
 	}
 
-	const { label, node_count, tx_count, tx_delay, max_peers, pow, wait } = req.body;
+	const { label, node_count, tx_count, tx_delay, max_peers, wait,
+	        orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window,
+	        monitor_period } = req.body;
 
 	// Validate required params (same as addQueue)
 	const nodeCount = parseInt(node_count);
@@ -154,13 +157,6 @@ exports.updateQueue = catchAsync(async (req, res, next) => {
 		return next(new AppError('Invalid max_peers: must be a positive integer', 400));
 	}
 
-	// Handle pow: default 3, range 1-5
-	let powVal = parseInt(pow);
-	if (isNaN(powVal)) powVal = 3;
-	if (powVal < 1 || powVal > 5) {
-		return next(new AppError('Invalid pow: must be between 1 and 5', 400));
-	}
-
 	// Handle wait period: default 300
 	let waitVal = parseInt(wait);
 	if (isNaN(waitVal)) waitVal = 300;
@@ -172,8 +168,13 @@ exports.updateQueue = catchAsync(async (req, res, next) => {
 			tx_count: txCount,
 			tx_delay: txDelay,
 			max_peers: maxPeers,
-			pow: powVal,
-			wait: waitVal
+			wait: waitVal,
+			orphan_ttl: orphan_ttl || 600,
+			orphan_pool_max: orphan_pool_max || 1000,
+			rate_limit_base: rate_limit_base || 10.0,
+			rate_limit_burst: rate_limit_burst || 20.0,
+			rate_limit_window_sec: rate_limit_window || 60,
+			monitor_period: monitor_period || 5
 		});
 
 		res.status(200).json({
@@ -233,6 +234,63 @@ exports.startNow = catchAsync(async (req, res, next) => {
 	res.status(200).json({
 		status: 'success',
 		data: { message: 'Queue runner triggered' }
+	});
+});
+
+/**
+ * Bulk add items to the simulation queue
+ * POST /api/simulations/queue/bulk
+ */
+exports.bulkAddQueue = catchAsync(async (req, res, next) => {
+	const { items } = req.body;
+
+	if (!Array.isArray(items) || items.length === 0) {
+		return next(new AppError('items must be a non-empty array', 400));
+	}
+
+	const parsedItems = [];
+	for (const item of items) {
+		const nodeCount = parseInt(item.node_count);
+		if (isNaN(nodeCount) || nodeCount < 1) {
+			return next(new AppError(`Invalid node_count in batch item: ${item.node_count}`, 400));
+		}
+		const txCount = parseInt(item.tx_count);
+		if (isNaN(txCount) || txCount < 1) {
+			return next(new AppError(`Invalid tx_count in batch item: ${item.tx_count}`, 400));
+		}
+		const txDelay = parseInt(item.tx_delay);
+		if (isNaN(txDelay) || txDelay < 0) {
+			return next(new AppError(`Invalid tx_delay in batch item: ${item.tx_delay}`, 400));
+		}
+		const maxPeers = parseInt(item.max_peers);
+		if (isNaN(maxPeers) || maxPeers < 1) {
+			return next(new AppError(`Invalid max_peers in batch item: ${item.max_peers}`, 400));
+		}
+		let waitVal = parseInt(item.wait);
+		if (isNaN(waitVal)) waitVal = 300;
+
+		parsedItems.push({
+			label: item.label || null,
+			node_count: nodeCount,
+			tx_count: txCount,
+			tx_delay: txDelay,
+			max_peers: maxPeers,
+			wait: waitVal,
+			orphan_ttl: item.orphan_ttl || 600,
+			orphan_pool_max: item.orphan_pool_max || 1000,
+			rate_limit_base: item.rate_limit_base || 10.0,
+			rate_limit_burst: item.rate_limit_burst || 20.0,
+			rate_limit_window_sec: item.rate_limit_window || 60,
+			monitor_period: item.monitor_period || 5
+		});
+	}
+
+	const result = await addQueueItemsBulk(parsedItems);
+
+	res.status(201).json({
+		status: 'success',
+		count: result.length,
+		data: { items: result }
 	});
 });
 

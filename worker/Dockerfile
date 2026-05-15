@@ -38,5 +38,11 @@ COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
 ENV HMAC_SECRET="dbicbidbicdnsonxpwqhudighsanxwqoueiobjsamopdjwqioh"
+ENV ORPHAN_TTL_SEC=600
+ENV ORPHAN_POOL_MAX=1000
+ENV RATE_LIMIT_BASE=10.0
+ENV RATE_LIMIT_BURST=20.0
+ENV RATE_LIMIT_WINDOW_SEC=60
+ENV MONITOR_PERIOD=5
 
 ENTRYPOINT ["./entrypoint.sh"]

@@ -4,7 +4,7 @@ const sqlite3 = require("sqlite3").verbose();
 
 // Use DATA_ROOT if available (for Docker), otherwise fall back to relative path
 const dataDir = process.env.DATA_ROOT || path.join(__dirname, "../data");
-const file = process.env.SQLITE_FILE || path.join(dataDir, "db.sqlite3");
+const file = process.env.SQLITE_FILE || path.join(dataDir, "db_v2.sqlite3");
 
 const db = new sqlite3.Database(file, (err) => {
 	if (err) {
@@ -30,7 +30,8 @@ db.serialize(() => {
             node_count INTEGER,
             nodes_expected INTEGER,
             nodes_reported INTEGER DEFAULT 0,
-            status TEXT CHECK(status IN ('running', 'complete', 'incomplete')) DEFAULT 'running'
+            status TEXT CHECK(status IN ('running', 'complete', 'incomplete')) DEFAULT 'running',
+            label TEXT
         )
     `);
 
@@ -136,8 +137,13 @@ db.serialize(() => {
             tx_count INTEGER,
             tx_delay INTEGER,
             max_peers INTEGER,
-            pow INTEGER,
             wait INTEGER,
+            orphan_ttl INTEGER DEFAULT 600,
+            orphan_pool_max INTEGER DEFAULT 1000,
+            rate_limit_base REAL DEFAULT 10.0,
+            rate_limit_burst REAL DEFAULT 20.0,
+            rate_limit_window_sec INTEGER DEFAULT 60,
+            monitor_period INTEGER DEFAULT 5,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
         )
@@ -170,8 +176,13 @@ db.serialize(() => {
             tx_count INTEGER NOT NULL,
             tx_delay INTEGER NOT NULL,
             max_peers INTEGER NOT NULL,
-            pow INTEGER NOT NULL,
             wait INTEGER NOT NULL,
+            orphan_ttl INTEGER DEFAULT 600,
+            orphan_pool_max INTEGER DEFAULT 1000,
+            rate_limit_base REAL DEFAULT 10.0,
+            rate_limit_burst REAL DEFAULT 20.0,
+            rate_limit_window_sec INTEGER DEFAULT 60,
+            monitor_period INTEGER DEFAULT 5,
             status TEXT NOT NULL CHECK(status IN ('pending','started','completed','error')) DEFAULT 'pending',
             run_id INTEGER,
             error_message TEXT,
@@ -182,6 +193,13 @@ db.serialize(() => {
     `);
 	db.run(`CREATE INDEX IF NOT EXISTS idx_simulation_queue_status_position ON simulation_queue(status, position)`);
 	db.run(`CREATE INDEX IF NOT EXISTS idx_simulation_queue_run_id ON simulation_queue(run_id)`);
+
+	// Migration: add label column to runs if missing
+	db.run(`ALTER TABLE runs ADD COLUMN label TEXT`, (err) => {
+		if (err && !err.message.includes('duplicate column')) {
+			console.error('[db] Failed to add runs.label column:', err.message);
+		}
+	});
 
 	// Indexes for performance
 	db.run(`CREATE INDEX IF NOT EXISTS idx_transactions_tx_id ON transactions(transaction_id)`);
@@ -214,17 +232,31 @@ function withTransaction(fn) {
 // ========== RUN MANAGEMENT ==========
 
 // Run management
-function getOrCreateRun(runId) {
+function getOrCreateRun(runId, label = null) {
 	return new Promise((resolve, reject) => {
 		db.get(`SELECT * FROM runs WHERE run_id = ?`, [runId], (err, row) => {
 			if (err) return reject(err);
-			if (row) return resolve(row);
+			if (row) {
+				// Update label if provided and currently null
+				if (label && !row.label) {
+					const upd = db.prepare(`UPDATE runs SET label = ? WHERE run_id = ?`);
+					upd.run(label, runId, function(uErr) {
+						upd.finalize();
+						if (uErr) return reject(uErr);
+						row.label = label;
+						resolve(row);
+					});
+				} else {
+					resolve(row);
+				}
+				return;
+			}
 
 			// Create new run
 			const stmt = db.prepare(`
-                INSERT INTO runs (run_id, status) VALUES (?, 'running')
+                INSERT INTO runs (run_id, status, label) VALUES (?, 'running', ?)
             `);
-			stmt.run(runId, function(err) {
+			stmt.run(runId, label || null, function(err) {
 				if (err) return reject(err);
 				db.get(`SELECT * FROM runs WHERE id = ?`, [this.lastID], (err, newRow) => {
 					if (err) reject(err);
@@ -334,6 +366,7 @@ function listRuns() {
 			`SELECT
 				r.id,
 				r.run_id,
+				r.label,
 				r.started_at,
 				r.ended_at,
 				r.status,
@@ -343,8 +376,13 @@ function listRuns() {
 				p.tx_count   AS tx_count,
 				p.tx_delay   AS tx_delay,
 				p.max_peers  AS max_peers,
-				p.pow        AS pow,
 				p.wait       AS wait,
+				p.orphan_ttl AS orphan_ttl,
+				p.orphan_pool_max AS orphan_pool_max,
+				p.rate_limit_base AS rate_limit_base,
+				p.rate_limit_burst AS rate_limit_burst,
+				p.rate_limit_window_sec AS rate_limit_window_sec,
+				p.monitor_period AS monitor_period,
 				CASE
 					WHEN r.ended_at IS NOT NULL
 					THEN CAST((julianday(r.ended_at) - julianday(r.started_at)) * 86400000 AS INTEGER)
@@ -378,8 +416,13 @@ function listRuns() {
  * @param {Array} [filters.txRange] - [min, max] tx count range
  * @param {number} [filters.txDelay] - Transaction delay
  * @param {number} [filters.maxPeers] - Max peers per node
- * @param {number} [filters.pow] - PoW difficulty
  * @param {number} [filters.wait] - Wait period
+ * @param {number} [filters.orphanTtl] - Orphan TTL
+ * @param {number} [filters.orphanPoolMax] - Orphan pool max
+ * @param {number} [filters.rateLimitBase] - Rate limit base
+ * @param {number} [filters.rateLimitBurst] - Rate limit burst
+ * @param {number} [filters.rateLimitWindow] - Rate limit window
+ * @param {number} [filters.monitorPeriod] - Monitor period
  * @param {string} [filters.status] - Run status
  * @param {string} [filters.dateFrom] - Start date (YYYY-MM-DD)
  * @param {string} [filters.dateTo] - End date (YYYY-MM-DD)
@@ -405,13 +448,33 @@ function queryRunsByFilters(filters = {}) {
 			conditions.push('p.max_peers = ?');
 			params.push(filters.maxPeers);
 		}
-		if (filters.pow != null) {
-			conditions.push('p.pow = ?');
-			params.push(filters.pow);
-		}
 		if (filters.wait != null) {
 			conditions.push('p.wait = ?');
 			params.push(filters.wait);
+		}
+		if (filters.orphanTtl != null) {
+			conditions.push('p.orphan_ttl = ?');
+			params.push(filters.orphanTtl);
+		}
+		if (filters.orphanPoolMax != null) {
+			conditions.push('p.orphan_pool_max = ?');
+			params.push(filters.orphanPoolMax);
+		}
+		if (filters.rateLimitBase != null) {
+			conditions.push('p.rate_limit_base = ?');
+			params.push(filters.rateLimitBase);
+		}
+		if (filters.rateLimitBurst != null) {
+			conditions.push('p.rate_limit_burst = ?');
+			params.push(filters.rateLimitBurst);
+		}
+		if (filters.rateLimitWindow != null) {
+			conditions.push('p.rate_limit_window_sec = ?');
+			params.push(filters.rateLimitWindow);
+		}
+		if (filters.monitorPeriod != null) {
+			conditions.push('p.monitor_period = ?');
+			params.push(filters.monitorPeriod);
 		}
 		if (filters.status) {
 			conditions.push('r.status = ?');
@@ -432,6 +495,7 @@ function queryRunsByFilters(filters = {}) {
 			`SELECT
 				r.id,
 				r.run_id,
+				r.label,
 				r.started_at,
 				r.ended_at,
 				r.status,
@@ -1113,8 +1177,9 @@ function insertRunParams(runId, params) {
 			// Update run_params
 			const stmt = db.prepare(`
                 INSERT OR REPLACE INTO run_params
-                (run_id, node_count, tx_count, tx_delay, max_peers, pow, wait)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (run_id, node_count, tx_count, tx_delay, max_peers, wait,
+                 orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
 			stmt.run(
 				run.id,
@@ -1122,8 +1187,13 @@ function insertRunParams(runId, params) {
 				params.tx_count,
 				params.tx_delay,
 				params.max_peers,
-				params.pow,
 				params.wait,
+				params.orphan_ttl,
+				params.orphan_pool_max,
+				params.rate_limit_base,
+				params.rate_limit_burst,
+				params.rate_limit_window_sec,
+				params.monitor_period,
 				function(err) {
 					if (err) {
 						stmt.finalize();
@@ -1150,7 +1220,9 @@ function getRunWithParams(runId) {
 	return new Promise((resolve, reject) => {
 		db.get(`
             SELECT r.*, rp.node_count as param_node_count, rp.tx_count, rp.tx_delay,
-                   rp.max_peers, rp.pow, rp.wait
+                   rp.max_peers, rp.wait,
+                   rp.orphan_ttl, rp.orphan_pool_max, rp.rate_limit_base,
+                   rp.rate_limit_burst, rp.rate_limit_window_sec, rp.monitor_period
             FROM runs r
             LEFT JOIN run_params rp ON r.id = rp.run_id
             WHERE r.run_id = ?
@@ -1274,7 +1346,9 @@ function getAllRunParamsWithStatus(statusFilter = 'all') {
 			whereClause = `WHERE r.status = '${mappedStatus}'`;
 		}
 		db.all(`
-            SELECT rp.node_count, rp.tx_count, rp.tx_delay, rp.max_peers, rp.pow,
+            SELECT rp.node_count, rp.tx_count, rp.tx_delay, rp.max_peers,
+                   rp.wait, rp.orphan_ttl, rp.orphan_pool_max, rp.rate_limit_base,
+                   rp.rate_limit_burst, rp.rate_limit_window_sec, rp.monitor_period,
                    r.status, r.nodes_expected, r.nodes_reported
             FROM run_params rp
             JOIN runs r ON rp.run_id = r.id
@@ -1387,7 +1461,6 @@ function getChartsData(runId) {
 				label: tx.transaction_id === 'genesis' ? 'genesis' :
 					`${tx.sender?.slice(0,1) || '?'}→${tx.receiver?.slice(0,1) || '?'}`,
 				verificationMs: tx.verification_duration || 0,
-				powMs: tx.pow_duration || 0,
 				tsaMs: tx.tsa_duration || 0,
 				completionMs: tx.completion_duration || 0
 			}));
@@ -1466,13 +1539,18 @@ async function deleteRunAtomic(runId) {
 
 // ========== SIMULATION QUEUE ==========
 
-function addQueueItem({ label, node_count, tx_count, tx_delay, max_peers, pow, wait }) {
+function addQueueItem({ label, node_count, tx_count, tx_delay, max_peers, wait,
+	orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period }) {
 	return new Promise((resolve, reject) => {
 		const stmt = db.prepare(`
-            INSERT INTO simulation_queue (position, label, node_count, tx_count, tx_delay, max_peers, pow, wait)
-            VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM simulation_queue WHERE status='pending'), ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO simulation_queue (position, label, node_count, tx_count, tx_delay, max_peers, wait,
+                orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period)
+            VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM simulation_queue WHERE status='pending'),
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-		stmt.run(label, node_count, tx_count, tx_delay, max_peers, pow, wait, function(err) {
+		stmt.run(label, node_count, tx_count, tx_delay, max_peers, wait,
+			orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period,
+			function(err) {
 			if (err) {
 				stmt.finalize();
 				return reject(err);
@@ -1483,6 +1561,17 @@ function addQueueItem({ label, node_count, tx_count, tx_delay, max_peers, pow, w
 				else resolve(row);
 			});
 		});
+	});
+}
+
+function addQueueItemsBulk(items) {
+	return withTransaction(async () => {
+		const results = [];
+		for (const item of items) {
+			const row = await addQueueItem(item);
+			results.push(row);
+		}
+		return results;
 	});
 }
 
@@ -1604,7 +1693,8 @@ function markQueueError(id, errorMessage) {
 	});
 }
 
-function updateQueueItem(id, { label, node_count, tx_count, tx_delay, max_peers, pow, wait }) {
+function updateQueueItem(id, { label, node_count, tx_count, tx_delay, max_peers, wait,
+	orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period }) {
 	return new Promise((resolve, reject) => {
 		// Only allow updating pending items
 		db.get(`SELECT status FROM simulation_queue WHERE id = ?`, [id], (err, row) => {
@@ -1614,10 +1704,14 @@ function updateQueueItem(id, { label, node_count, tx_count, tx_delay, max_peers,
 
 			const stmt = db.prepare(`
 				UPDATE simulation_queue
-				SET label = ?, node_count = ?, tx_count = ?, tx_delay = ?, max_peers = ?, pow = ?, wait = ?
+				SET label = ?, node_count = ?, tx_count = ?, tx_delay = ?, max_peers = ?, wait = ?,
+				    orphan_ttl = ?, orphan_pool_max = ?, rate_limit_base = ?,
+				    rate_limit_burst = ?, rate_limit_window_sec = ?, monitor_period = ?
 				WHERE id = ?
 			`);
-			stmt.run(label, node_count, tx_count, tx_delay, max_peers, pow, wait, id, function(err) {
+			stmt.run(label, node_count, tx_count, tx_delay, max_peers, wait,
+				orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window_sec, monitor_period,
+				id, function(err) {
 				if (err) {
 					stmt.finalize();
 					return reject(err);
@@ -1674,6 +1768,7 @@ module.exports = {
 	deleteRunAtomic,
 	// Simulation queue
 	addQueueItem,
+	addQueueItemsBulk,
 	listQueue,
 	getQueueItem,
 	removeQueueItem,

@@ -99,5 +99,11 @@ services:
       - docknet
     environment:
       BASE_IP: ${BASE_IP:-172.25.0.1}
+      ORPHAN_TTL_SEC: ${ORPHAN_TTL_SEC:-600}
+      ORPHAN_POOL_MAX: ${ORPHAN_POOL_MAX:-1000}
+      RATE_LIMIT_BASE: ${RATE_LIMIT_BASE:-10.0}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-20.0}
+      RATE_LIMIT_WINDOW_SEC: ${RATE_LIMIT_WINDOW_SEC:-60}
+      MONITOR_PERIOD: ${MONITOR_PERIOD:-5}
     # no real container run—just build the image
     entrypoint: ["/bin/true"]

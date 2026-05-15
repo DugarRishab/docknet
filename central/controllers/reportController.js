@@ -197,7 +197,7 @@ exports.generateReport = catchAsync(async (req, res, next) => {
             node_index: n.node_index,
             original_node_id: n.original_node_id,
             tx_count: nodeTx.length,
-            avg_pow_duration: Math.round(avg(nodeTx.map(t => t.pow_duration))),
+            avg_verification_duration: Math.round(avg(nodeTx.map(t => t.verification_duration))),
             avg_consensus_duration: Math.round(avg(nodeTx.map(t => t.consensus_duration))),
             avg_propagation_delay: Math.round(avg(nodeTx.map(t => t.propagation_delay)))
         };
@@ -223,8 +223,13 @@ exports.generateReport = catchAsync(async (req, res, next) => {
                 tx_count: run.tx_count,
                 tx_delay: run.tx_delay,
                 max_peers: run.max_peers,
-                pow: run.pow,
-                wait: run.wait
+                wait: run.wait,
+                orphanTtl: run.orphan_ttl,
+                orphanPoolMax: run.orphan_pool_max,
+                rateLimitBase: run.rate_limit_base,
+                rateLimitBurst: run.rate_limit_burst,
+                rateLimitWindow: run.rate_limit_window_sec,
+                monitorPeriod: run.monitor_period
             }
         },
         transactions: {
@@ -257,9 +262,9 @@ exports.generateReport = catchAsync(async (req, res, next) => {
             avg_per_hop_ms: Math.round(avg(transactions.map(t => t.avg_propagation_delay))),
             distribution: computeHistogram(transactions.map(t => t.propagation_delay).filter(d => d != null))
         },
-        pow: {
-            avg_duration_ms: Math.round(avg(transactions.map(t => t.pow_duration))),
-            distribution: computeHistogram(transactions.map(t => t.pow_duration).filter(d => d != null))
+        verification: {
+            avg_duration_ms: Math.round(avg(transactions.map(t => t.verification_duration))),
+            distribution: computeHistogram(transactions.map(t => t.verification_duration).filter(d => d != null))
         },
         network: {
             total_nodes: nodes.length,
@@ -325,8 +330,13 @@ exports.getTelemetry = catchAsync(async (req, res, next) => {
                     txCount: run.tx_count,
                     txDelay: run.tx_delay,
                     maxPeers: run.max_peers,
-                    pow: run.pow,
-                    wait: run.wait
+                    wait: run.wait,
+                    orphanTtl: run.orphan_ttl,
+                    orphanPoolMax: run.orphan_pool_max,
+                    rateLimitBase: run.rate_limit_base,
+                    rateLimitBurst: run.rate_limit_burst,
+                    rateLimitWindow: run.rate_limit_window_sec,
+                    monitorPeriod: run.monitor_period
                 }
             },
             kpis: {
@@ -339,7 +349,7 @@ exports.getTelemetry = catchAsync(async (req, res, next) => {
                 maxDagDepth: 0, // Calculated below
                 genesisWeight: 0, // Calculated below
                 avgVerificationMs,
-                avgPowMs,
+                avgPowMs: 0, // deprecated, PoW removed in v2
                 avgTsaMs,
                 avgCompletionMs,
                 avgPropagationDelayMs,
@@ -577,7 +587,12 @@ exports.queryRunsByFilters = catchAsync(async (req, res) => {
         txRange: req.query.txRange ? req.query.txRange.split(',').map(Number) : null,
         txDelay: req.query.txDelay != null ? parseInt(req.query.txDelay) : null,
         maxPeers: req.query.maxPeers != null ? parseInt(req.query.maxPeers) : null,
-        pow: req.query.pow != null ? parseInt(req.query.pow) : null,
+        orphanTtl: req.query.orphanTtl != null ? parseInt(req.query.orphanTtl) : null,
+        orphanPoolMax: req.query.orphanPoolMax != null ? parseInt(req.query.orphanPoolMax) : null,
+        rateLimitBase: req.query.rateLimitBase != null ? parseFloat(req.query.rateLimitBase) : null,
+        rateLimitBurst: req.query.rateLimitBurst != null ? parseFloat(req.query.rateLimitBurst) : null,
+        rateLimitWindow: req.query.rateLimitWindow != null ? parseInt(req.query.rateLimitWindow) : null,
+        monitorPeriod: req.query.monitorPeriod != null ? parseInt(req.query.monitorPeriod) : null,
         wait: req.query.wait != null ? parseInt(req.query.wait) : null,
         status: req.query.status || null,
         dateFrom: req.query.dateFrom || null,

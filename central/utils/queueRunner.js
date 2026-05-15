@@ -81,8 +81,13 @@ async function launchNextPending() {
 				txCount: next.tx_count,
 				txDelay: next.tx_delay,
 				maxPeers: next.max_peers,
-				pow: next.pow,
 				wait: next.wait,
+				orphanTtl: next.orphan_ttl,
+				orphanPoolMax: next.orphan_pool_max,
+				rateLimitBase: next.rate_limit_base,
+				rateLimitBurst: next.rate_limit_burst,
+				rateLimitWindow: next.rate_limit_window_sec,
+				monitorPeriod: next.monitor_period,
 				runId: undefined // let it generate
 			});
 

@@ -8,7 +8,9 @@ const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 const SHARED_VOLUME = 'program-files';
 
 exports.startWorkers = catchAsync(async (req, res, next) => {
-    const { node_count, tx_count, tx_delay, max_peers, pow, run, wait } =
+    const { node_count, tx_count, tx_delay, max_peers, run, wait,
+            orphan_ttl, orphan_pool_max, rate_limit_base, rate_limit_burst, rate_limit_window,
+            monitor_period } =
         req.query;
     if (!node_count || node_count < 1)
         return next(new AppError('Invalid node_count', 400));
@@ -19,8 +21,6 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
         return next(new AppError('Invalid tx_delay', 400));
     if (!max_peers || max_peers < 1)
         return next(new AppError('Invalid max_peers', 400));
-    if (pow && (pow < 1 || pow > 5))
-        return next(new AppError('Invalid pow difficulty, must be 1-5', 400));
 
     // Remove all existing worker containers
     const existing = await docker.listContainers({
@@ -49,9 +49,15 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
                         `TX_COUNT=${tx_count}`,
                         `TX_DELAY=${tx_delay}`,
                         `MAX_PEERS=${max_peers}`,
-                        `POW=${pow || 3}`, // Default POW difficulty is 3
+                        `TOTAL_NODES=${node_count}`,
                         `RUN_ID=${run || 0}`,
                         `WAIT_PERIOD=${wait || 300}`, // Default wait period is 300 seconds
+                        `MONITOR_PERIOD=${monitor_period || 5}`,
+                        `ORPHAN_TTL_SEC=${orphan_ttl || 600}`,
+                        `ORPHAN_POOL_MAX=${orphan_pool_max || 1000}`,
+                        `RATE_LIMIT_BASE=${rate_limit_base || 10.0}`,
+                        `RATE_LIMIT_BURST=${rate_limit_burst || 20.0}`,
+                        `RATE_LIMIT_WINDOW_SEC=${rate_limit_window || 60}`,
                     ],
                     HostConfig: {
                         NetworkMode: 'docknet_docknet',
@@ -72,7 +78,6 @@ exports.startWorkers = catchAsync(async (req, res, next) => {
             tx_count: parseInt(tx_count),
             tx_delay: parseInt(tx_delay),
             max_peers: parseInt(max_peers),
-            pow: parseInt(pow) || 3,
             wait: parseInt(wait) || 300
         });
         console.log(`[startWorkers] Saved run params for run ${runRecord.run_id}`);
